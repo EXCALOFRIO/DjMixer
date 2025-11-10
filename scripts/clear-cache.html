@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Limpiar Cache - Aura Loop</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #0a0a0a;
+            color: #fff;
+        }
+        .container {
+            background: #1a1a1a;
+            padding: 30px;
+            border-radius: 12px;
+            border: 1px solid #333;
+        }
+        h1 {
+            color: #00ff88;
+            margin-top: 0;
+        }
+        button {
+            background: #00ff88;
+            color: #000;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background: #00dd77;
+        }
+        .danger {
+            background: #ff4444;
+            color: #fff;
+        }
+        .danger:hover {
+            background: #dd3333;
+        }
+        .info {
+            background: #333;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            border-left: 3px solid #00ff88;
+        }
+        .success {
+            background: #004422;
+            border-left-color: #00ff88;
+        }
+        .warning {
+            background: #442200;
+            border-left-color: #ffaa00;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🗑️ Limpiar Cache - Aura Loop</h1>
+        
+        <div class="info">
+            <strong>Cache actual:</strong>
+            <div id="cacheInfo">Calculando...</div>
+        </div>
+
+        <button onclick="clearLocalStorage()">Limpiar localStorage</button>
+        <button onclick="clearIndexedDB()">Limpiar IndexedDB</button>
+        <button class="danger" onclick="clearAll()">Limpiar TODO</button>
+
+        <div id="result"></div>
+    </div>
+
+    <script>
+        function updateCacheInfo() {
+            const keys = Object.keys(localStorage);
+            const geminiKeys = keys.filter(k => k.startsWith('gemini_'));
+            const size = JSON.stringify(localStorage).length;
+            
+            document.getElementById('cacheInfo').innerHTML = `
+                <br>• localStorage: ${keys.length} items (${(size / 1024).toFixed(2)} KB)
+                <br>• Análisis Gemini: ${geminiKeys.length} canciones
+            `;
+        }
+
+        function showResult(message, type = 'success') {
+            const result = document.getElementById('result');
+            result.className = `info ${type}`;
+            result.innerHTML = message;
+            updateCacheInfo();
+        }
+
+        function clearLocalStorage() {
+            const count = localStorage.length;
+            localStorage.clear();
+            showResult(`✅ localStorage limpiado (${count} items eliminados)`);
+        }
+
+        async function clearIndexedDB() {
+            try {
+                const dbs = await indexedDB.databases();
+                let count = 0;
+                
+                for (const db of dbs) {
+                    if (db.name) {
+                        await new Promise((resolve, reject) => {
+                            const request = indexedDB.deleteDatabase(db.name);
+                            request.onsuccess = () => {
+                                count++;
+                                resolve();
+                            };
+                            request.onerror = reject;
+                        });
+                    }
+                }
+                
+                showResult(`✅ IndexedDB limpiado (${count} bases de datos eliminadas)`);
+            } catch (error) {
+                showResult(`❌ Error: ${error.message}`, 'warning');
+            }
+        }
+
+        async function clearAll() {
+            if (!confirm('¿Estás seguro? Esto eliminará TODOS los análisis guardados localmente.')) {
+                return;
+            }
+            
+            clearLocalStorage();
+            await clearIndexedDB();
+            
+            showResult('✅ TODO limpiado. Recarga la página para empezar de nuevo.');
+        }
+
+        // Actualizar info al cargar
+        updateCacheInfo();
+    </script>
+</body>
+</html>
