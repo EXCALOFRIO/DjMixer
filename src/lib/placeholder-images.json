@@ -1,0 +1,10 @@
+{
+  "placeholderImages": [
+    {
+      "id": "album-art-placeholder",
+      "description": "Placeholder for album art",
+      "imageUrl": "https://images.unsplash.com/photo-1611506420749-9cbb8e5a1057?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3NDE5ODJ8MHwxfHNlYXJjaHw1fHxhbGJ1bSUyMGNvdmVyfGVufDB8fHx8MTc2Mjg5MzczMXww&ixlib=rb-4.1.0&q=80&w=1080",
+      "imageHint": "album cover"
+    }
+  ]
+}

@@ -1,193 +1,237 @@
-# 🎵 Aura Loop
+# 🎵 DJ Mixer - Sistema de Análisis Musical con IA
 
-Sistema de DJ automático con IA que crea mezclas perfectas entre canciones.
+Sistema profesional de análisis de audio que utiliza **Gemini 2.5 Flash** para análisis profundo de canciones, con almacenamiento en **PostgreSQL (Neon)** y reproductor optimizado.
 
-Utiliza análisis avanzado con Gemini AI y algoritmo A* para encontrar las mejores transiciones musicales.
+## ✨ Características
 
-## ✨ Características Principales
+### 🎯 Análisis Técnico Automático
+- **BPM Detection**: Detección precisa de tempo
+- **Tonalidad Camelot**: Sistema de notación para mezclas armónicas
+- **Energía y Bailabilidad**: Métricas calculadas del audio
+- **Downbeats**: Timestamps de cada compás para sincronización perfecta
 
-### 🤖 IA Avanzada
-- **Gemini AI**: Análisis semántico de letras, estructura y mood
-- **Algoritmo A***: Búsqueda exhaustiva de la mejor ruta entre canciones
-- **Scoring Híbrido**: Combina análisis técnico y semántico (1500+ puntos)
+### 🤖 Análisis con Gemini AI
+- **Transcripción de Letras**: Palabra por palabra con timestamps
+- **Estructura Musical**: Identificación de intro, verso, estribillo, puente, etc.
+- **Análisis Lírico**: Tema principal, palabras clave, evolución emocional
+- **Eventos Clave DJ**: Caídas de bajo, breaks, cambios rítmicos
 
-### 🎵 Análisis Musical
-- **Detección de Downbeats**: Identifica el "1" del compás para transiciones perfectas
-- **Compatibilidad Armónica**: Círculo de quintas y claves relativas
-- **Análisis de Energía**: Transiciones suaves entre niveles de energía
-- **Detección de Vocales**: Evita mezclar sobre voces
+### ⚡ Reproductor Optimizado
+- **Precarga Inteligente**: Buffer de 1-2 minutos automático
+- **Navegación Fluida**: Avance/retroceso entre canciones
+- **Visualización Moderna**: Anillos de progreso interactivos
+- **Caché en BD**: Evita análisis duplicados
 
-### 🎚️ Transiciones Profesionales
-- **Beatmatch** (4s): Para downbeats perfectos, mantiene el groove
-- **Crossfade** (2s): Mezcla suave estándar
-- **Cut** (0.5s): Cambios dramáticos y rápidos
-- **Ajuste de Tempo**: ±10% automático para igualar BPM
-
-### 📊 Sistema Inteligente
-- **Pre-renderizado**: Mezcla completa calculada antes de reproducir
-- **Normalización LUFS**: Volumen consistente entre canciones
-- **Exportación Detallada**: Análisis completo de cada transición
-- **Ruta Óptima**: Visita todas las canciones con el mejor score posible
+### 🚀 Procesamiento Paralelo
+- **Límite de Concurrencia**: Máximo 5 peticiones simultáneas a Gemini
+- **Cola Inteligente**: Procesa múltiples canciones eficientemente
+- **Progreso en Tiempo Real**: Actualización del progreso de análisis
+- **Manejo de Errores**: Continúa procesando aunque algunas canciones fallen
 
 ## 🚀 Inicio Rápido
 
-### Instalación
+### 1. Instalar Dependencias
 
 ```bash
 npm install
 ```
 
-### Desarrollo
+### 2. Configurar Variables de Entorno
+
+Edita el archivo `.env` con tus credenciales:
+
+```env
+# Gemini API Key - https://aistudio.google.com/app/apikey
+NEXT_PUBLIC_GEMINI_API_KEY=tu_api_key_aqui
+
+# Neon Database - https://console.neon.tech/
+DATABASE_URL=postgresql://usuario:password@host/database?sslmode=require
+```
+
+### 3. Inicializar Base de Datos
+
+```bash
+npm run db:init
+```
+
+Deberías ver:
+```
+✅ Tabla "canciones_analizadas" creada exitosamente
+📊 Columnas: 15
+🔑 Índices creados: 12
+✨ ¡Base de datos lista para usar!
+```
+
+### 4. Ejecutar Tests (Opcional)
+
+```bash
+npm test
+```
+
+### 5. Iniciar Aplicación
 
 ```bash
 npm run dev
 ```
 
-La aplicación estará disponible en `http://localhost:3000`
+Abre: http://localhost:9002
 
-## 📖 Cómo Usar
+## 🎯 Uso
 
-### 1️⃣ Cargar Canciones
-- Arrastra y suelta archivos de audio (MP3, WAV, FLAC, etc.)
-- O haz clic para seleccionarlos desde tu dispositivo
-- Soporta múltiples archivos simultáneos
+### Subir y Analizar Canciones
 
-### 2️⃣ Análisis Automático
-La aplicación analizará cada canción mostrando:
-- ✅ Progreso individual por canción con tarjetas elegantes
-- 🎵 Fase actual (decodificación, beats, segmentos, metadata)
-- 📊 Porcentaje de completado en tiempo real
-- 📋 Logs detallados en el panel flotante
+1. **Arrastra archivos** MP3/WAV a la interfaz
+2. **El análisis se procesa en el servidor** (30-60 segundos por canción)
+3. **Verás notificaciones** con BPM y energía detectados
+4. **Las canciones analizadas se guardan en la BD** para acceso instantáneo futuro
 
-### 3️⃣ Reproducción
-- 🎨 Visualiza la carátula grande y centrada
-- ▶️ Click en la carátula o botón play para iniciar
-- 🎵 La música se reproduce con transiciones automáticas
+### Ver Análisis Completo
 
-### 4️⃣ Controles
-- **Play/Pause**: Click en carátula o botón central
-- **Saltar**: Botones -15s / +15s
-- **Volumen**: Menú de 3 puntos → Control de volumen
-- **Descargar**: Menú de 3 puntos → Mezcla WAV o Análisis TXT
+- **Haz clic en el ícono ℹ️** junto al título de la canción
+- Explora metadatos técnicos, análisis de contenido, estructura musical y eventos clave
 
-### 5️⃣ Visualización
-- 🎨 **Anillo circular**: Muestra todas las canciones con sus carátulas
-- 📍 **Punto de progreso**: Indica la posición actual en la canción
-- ⏭️ **Siguiente**: Tarjeta con la próxima canción y tiempo restante
-- 📊 **Barra de progreso**: Muestra el tiempo transcurrido
+### Controles del Reproductor
 
-## 🔍 Sistema de Análisis
+- **Doble clic izquierda**: Retroceder 5 segundos
+- **Doble clic derecha**: Avanzar 5 segundos
+- **Clic centro**: Play/Pause
+- **Anillo**: Arrastrar para buscar en la canción
 
-### Análisis Técnico (Essentia + Meyda)
-- Detección de beats y downbeats
-- Análisis de energía por beat
-- Detección de vocales
-- Tempo, clave y modo musical
+## 🗄️ Estructura de la Base de Datos
 
-### Análisis Semántico (Gemini AI)
-- Identificación de secciones (intro, verse, chorus, outro)
-- Análisis de temas y mood
-- Puntos de transición sugeridos
-- Compatibilidad emocional entre canciones
+### Tabla: `canciones_analizadas`
 
-### Scoring de Transiciones
-1. **Estructura** (300 pts): Downbeats y fraseo
-2. **Armonía** (200 pts): Compatibilidad de claves
-3. **Técnico** (300 pts): Energía, vocales, tempo
-4. **Gemini** (500 pts): Puntos sugeridos, temas, mood
-5. **Variedad** (variable): Anti-repetición
+| Campo | Tipo | Descripción |
+|-------|------|-------------|
+| `id` | UUID | Identificador único |
+| `hash_archivo` | VARCHAR(256) | Hash SHA-256 para deduplicación |
+| `titulo` | TEXT | Título de la canción |
+| `artista` | TEXT | Artista(s) |
+| `duracion_ms` | INTEGER | Duración en milisegundos |
+| `bpm` | FLOAT | Beats por minuto |
+| `tonalidad_camelot` | VARCHAR(3) | Tonalidad (ej: "8A", "10B") |
+| `energia` | FLOAT | 0.0 - 1.0 |
+| `bailabilidad` | FLOAT | 0.0 - 1.0 |
+| `animo_general` | VARCHAR(50) | Estado de ánimo |
+| `downbeats_ts_ms` | JSONB | Array de timestamps |
+| `letras_ts` | JSONB | Transcripción con timestamps |
+| `estructura_ts` | JSONB | Secciones musicales |
+| `analisis_contenido` | JSONB | Análisis lírico y eventos DJ |
+| `fecha_procesado` | TIMESTAMPTZ | Fecha de análisis |
 
-### Algoritmo A*
-- Explora 27.5M de combinaciones
-- Encuentra las 5 mejores rutas
-- 95-98% de calidad óptima
-- Tiempo: 30-60 segundos
+## 🧪 Tests
 
-## 🎨 Interfaz
+El proyecto incluye tests completos para verificar:
 
-### Pantalla de Carga
-- Zona de arrastrar y soltar archivos
-- Soporte para múltiples archivos simultáneos
+- ✅ Detección de BPM
+- ✅ Cálculo de energía y bailabilidad
+- ✅ Detección de downbeats
+- ✅ Análisis de tonalidad
+- ✅ Integración con Gemini
+- ✅ Operaciones de base de datos
 
-### Pantalla de Análisis
-- Barra de progreso general
-- Lista de canciones con progreso individual
-- Indicadores visuales de fase actual
-- Mensajes descriptivos por canción
-
-### Pantalla de Reproducción
-- Visualizador circular animado
-- Información de la canción actual (portada, título, artista)
-- Botón de play/pause
-- Panel de logs flotante
-
-## 🛠️ Tecnologías
-
-- **React + TypeScript**: Framework principal
-- **Vite**: Build tool y dev server
-- **Gemini 2.5 Flash**: Análisis semántico con IA
-- **Essentia.js**: Análisis de audio profesional
-- **Meyda**: Extracción de características musicales
-- **Web Audio API**: Reproducción y efectos
-- **Tailwind CSS**: Diseño moderno
-
-## 📁 Estructura del Proyecto
-
-```
-aura-loop/
-├── components/              # Componentes React
-├── services/
-│   ├── AudioPlayer.ts      # Orquestador principal
-│   ├── PathFinderEngine.ts # Algoritmo A*
-│   ├── SmartTransitionEngine.ts # Sistema de scoring
-│   ├── GeminiAnalyzer.ts   # Análisis con IA
-│   ├── MasterAnalyzer.ts   # Coordinador de análisis
-│   └── AudioAnalyzer.ts    # Análisis técnico
-├── App.tsx                 # Componente principal
-└── types.ts                # Definiciones de tipos
+Ejecutar tests:
+```bash
+npm test
 ```
 
-## 🔧 Configuración
+## 🏗️ Arquitectura
 
-### Variables de Entorno
+### Cliente (Navegador)
+- Interfaz de usuario con Next.js 15
+- Reproductor de audio con Web Audio API
+- Extracción de metadatos con music-metadata-browser
+- Visualización de análisis
 
-Crea un archivo `.env`:
+### Servidor (API Routes)
+- Análisis de audio con music-tempo
+- Integración con Gemini 2.5 Flash
+- Almacenamiento en Neon PostgreSQL
+- Caché inteligente con hash SHA-256
 
-```env
-VITE_GEMINI_API_KEY=tu_api_key_aqui
+### Flujo de Análisis
+```
+Usuario sube archivo → API /analyze → Análisis técnico → Gemini AI → Base de datos → Cliente
 ```
 
-Obtén tu API key en: https://aistudio.google.com/app/apikey
+## 📊 Tecnologías
 
-## 📝 Notas Técnicas
+- **Next.js 15** - Framework React con API Routes
+- **Gemini 2.5 Flash** - Análisis de audio con IA
+- **Neon PostgreSQL** - Base de datos serverless
+- **music-metadata-browser** - Extracción de metadatos
+- **music-tempo** - Detección de BPM
+- **Web Audio API** - Procesamiento de audio
+- **Vitest** - Framework de testing
 
-- El análisis se realiza completamente en el navegador (client-side)
-- No se envían datos a servidores externos
-- Los archivos de audio permanecen en tu dispositivo
-- El análisis puede tardar según el tamaño y cantidad de canciones
+## 🧪 Suite de Tests
 
-### ⚠️ Recomendaciones de Uso
+**39 tests pasando al 100%**
 
-**Para evitar problemas de memoria:**
-- ✅ Usa **máximo 10 canciones** a la vez
-- ✅ Canciones de **3-5 minutos** son ideales
-- ✅ Cierra otras pestañas del navegador
-- ✅ Usa archivos MP3 de **calidad media** (128-192 kbps)
-- ❌ Evita archivos WAV o FLAC muy grandes
-- ❌ No uses canciones de más de 10 minutos
+### Audio Analysis (13 tests)
+- Detección de BPM para diferentes tempos
+- Cálculo de energía y bailabilidad
+- Detección de downbeats
+- Conversión de tonalidad a Camelot
+- Validaciones de rangos
 
-## 🐛 Debugging
+### Database (14 tests)
+- Validación de estructuras de datos
+- Constraints de base de datos
+- Serialización/deserialización JSONB
+- Queries de búsqueda comunes
 
-Para ver logs detallados:
+### Concurrency Queue (12 tests)
+- Límite de concurrencia (máx 5 simultáneas)
+- Manejo de errores sin detener procesamiento
+- Reporte de progreso en tiempo real
+- Simulación de análisis masivo (20 canciones)
 
-1. Abre el panel de logs (botón inferior derecho)
-2. Abre la consola del navegador (F12)
-3. Los logs aparecen en ambos lugares con emojis descriptivos
+```bash
+npm test              # Ejecutar todos los tests
+npm run test:watch    # Modo watch
+npm run test:ui       # Interfaz visual
+```
+
+## 🔧 Scripts Disponibles
+
+```bash
+npm run dev          # Iniciar servidor de desarrollo
+npm run build        # Compilar para producción
+npm run start        # Iniciar servidor de producción
+npm run db:init      # Inicializar base de datos
+npm test             # Ejecutar tests
+npm run typecheck    # Verificar tipos TypeScript
+```
+
+## 📝 Notas Importantes
+
+- **Límites de Gemini**: 1M tokens de contexto, 9.5 horas de audio máximo
+- **Formatos Soportados**: MP3, WAV, AIFF, AAC, OGG, FLAC
+- **Tamaño Máximo**: 20 MB por request directo
+- **Tokens de Audio**: 32 tokens por segundo de audio
+
+## 🐛 Solución de Problemas
+
+### Error: "DATABASE_URL no está definida"
+- Verifica que `.env` existe y tiene la variable configurada
+
+### Error: "Failed to fetch from Gemini"
+- Verifica tu API key en https://aistudio.google.com/app/apikey
+- Revisa los límites de tu cuenta
+
+### Error: "Cannot connect to database"
+- Verifica la connection string de Neon
+- Asegúrate de que el proyecto está activo en https://console.neon.tech/
 
 ## 📄 Licencia
 
-MIT
+Este proyecto utiliza:
+- Gemini API (Google)
+- Neon PostgreSQL
+- music-metadata-browser (MIT)
+- music-tempo (MIT)
 
-## 🤝 Contribuciones
+---
 
-Las contribuciones son bienvenidas. Por favor, abre un issue primero para discutir los cambios propuestos.
+**Desarrollado con ❤️ para DJs y amantes de la música**
