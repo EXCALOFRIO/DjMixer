@@ -1,14 +1,46 @@
-import type { CancionAnalizada, EstructuraMusical, TranscripcionPalabra } from './db';
+import type { 
+  CancionAnalizada, 
+  SegmentoVoz, 
+  HuecoInstrumental, 
+  EventoClaveDJ, 
+  EstructuraMusical 
+} from './db';
+
+// Tipos de estrategias de mezcla para saber CÓMO mezclar
+export type CueStrategy = 
+  | 'INTRO_SIMPLE'      // Entrada limpia en intro/hueco instrumental
+  | 'DROP_SWAP'         // Swap en drop/caída de bajo (con build-up)
+  | 'IMPACT_ENTRY'      // Entrada directa en drop (sin build-up, corte seco)
+  | 'OUTRO_FADE'        // Fade out clásico en outro
+  | 'BREAKDOWN_ENTRY'   // Entrada en breakdown/melodía
+  | 'LOOP_ANCHOR'       // Punto de anclaje para loops
+  | 'EVENT_SYNC';       // Sincronización con evento DJ
+
+// Tipos de curva de crossfade para el reproductor
+export type CrossfadeCurve = 
+  | 'LINEAR'            // Fade lineal estándar
+  | 'BASS_SWAP'         // Swap de bajos (cortar bajos de A al entrar B)
+  | 'CUT'               // Corte seco sin crossfade
+  | 'POWER_MIX';        // Mezcla con ambos tracks a volumen alto
 
 export interface CuePoint {
   trackId: string;
   hash: string;
   title: string;
-  type: 'IN' | 'OUT';
   pointMs: number;
-  sectionType?: string;
+  type: 'IN' | 'OUT';
+  strategy: CueStrategy;
   score: number;
-  vocalMarginMs: number;
+  
+  // Metadatos cruciales para la transición
+  safeDurationMs: number;    // Cuánto tiempo limpio tenemos
+  hasVocalOverlap: boolean;  // Si choca con voces
+  alignedToPhrase: boolean;  // Si cae en un inicio de frase exacto
+  alignedToBar: boolean;     // Si cae en inicio de compás (4 beats)
+  alignedTo8BarGrid: boolean; // Si cae en bloque de 8 compases (32 beats)
+  eventLink?: string;        // Link a evento DJ si aplica
+  sectionType?: string;      // Tipo de sección musical
+  suggestedCurve?: CrossfadeCurve; // Curva recomendada para esta entrada/salida
 }
 
 export interface MixPlanEntry {
@@ -20,412 +52,549 @@ export interface MixPlanEntry {
   bestExitPoints: CuePoint[];
 }
 
-const SECTION_WEIGHTS: Record<string, number> = {
-  intro: 1.5,
-  outro: 1.5,
-  solo_instrumental: 1.4,
-  subidon_build_up: 1.3,
-  estribillo: 1.2,
-  puente: 1.05,
-  verso: 1.0,
-  silencio: 0.8,
+// Configuración de pesos
+const WEIGHTS = {
+  INSTRUMENTAL_PURE: 1.5,     // Multiplicador para huecos puros
+  EVENT_ALIGNMENT: 2.0,       // Multiplicador si se alinea a un evento DJ
+  PHRASE_ALIGNMENT: 1.2,      // Multiplicador si cae en frase exacta
+  VOCAL_CLASH_PENALTY: 0.1,   // Penalización brutal si choca voz
+  INTRO_BONUS: 1.3,           // Bonus para intros reales
+  OUTRO_BONUS: 1.3,           // Bonus para outros reales
 };
 
-const MAX_CANDIDATES = 5;
-const MIN_VOCAL_GAP_MS = 1500;
-const CROSSFADE_MAX_MS = 12000;
-const CROSSFADE_MIN_MS = 3000;
-const MAX_ENTRY_RATIO = 0.4;
-const MIN_EXIT_RATIO = 0.6;
+const MIN_MIX_WINDOW_MS = 4000; // Mínimo 4 segundos para mezclar
+const PRE_EVENT_ROLLBACK_MS = 16000; // ~16s antes del evento para build-up (2 bloques de 8 compases)
+const IMPACT_ENTRY_THRESHOLD_MS = 5000; // Si el drop está antes de esto, es IMPACT en vez de SWAP
+const MAX_ENTRY_POSITION = 0.4; // 40% de la canción
+const MIN_EXIT_POSITION = 0.6; // 60% de la canción
 
 export function buildMixPlan(tracks: CancionAnalizada[]): MixPlanEntry[] {
-  return tracks.map((track) => {
-    const duration = track.duracion_ms;
+  return tracks.map(track => {
+    // Normalizar datos si vienen como strings JSON del CSV
+    const huecos = normalizeArray<HuecoInstrumental>(track.huecos_analizados);
+    const voces = normalizeArray<SegmentoVoz>(track.segmentos_voz);
+    const eventos = normalizeEventos(track.analisis_contenido?.eventos_clave_dj);
     const estructura = normalizeEstructura(track.estructura_ts);
-    const frases = Array.isArray(track.frases_ts_ms) ? track.frases_ts_ms.filter((v): v is number => typeof v === 'number') : [];
-    const letras = normalizeLetras(track.letras_ts);
+    const frases = normalizeNumericArray(track.frases_ts_ms);
 
-    const bestEntryPoints = findBestEntryPoints(track, duration, estructura, frases, letras);
-    const bestExitPoints = findBestExitPoints(track, duration, estructura, frases, letras);
+    // Calcular puntos
+    const entryPoints = findSophisticatedEntryPoints(
+      track, 
+      huecos, 
+      voces, 
+      eventos, 
+      estructura, 
+      frases
+    );
+    
+    const exitPoints = findSophisticatedExitPoints(
+      track, 
+      huecos, 
+      voces, 
+      eventos, 
+      estructura, 
+      frases
+    );
 
-    console.log(`📊 ${track.titulo}:`);
-    console.log(`  ✅ ${bestEntryPoints.length} puntos de entrada (top 5)`);
-    console.log(`  ✅ ${bestExitPoints.length} puntos de salida (top 5)`);
+    console.log(`📊 MixPlan para "${track.titulo}":`);
+    console.log(`  🎯 ${entryPoints.length} puntos de entrada (top score: ${entryPoints[0]?.score ?? 0})`);
+    console.log(`  🚪 ${exitPoints.length} puntos de salida (top score: ${exitPoints[0]?.score ?? 0})`);
 
     return {
       trackId: track.id,
       hash: track.hash_archivo,
       title: track.titulo,
-      durationMs: duration,
-      bestEntryPoints,
-      bestExitPoints,
+      durationMs: track.duracion_ms,
+      bestEntryPoints: entryPoints.sort((a, b) => b.score - a.score).slice(0, 5),
+      bestExitPoints: exitPoints.sort((a, b) => b.score - a.score).slice(0, 5),
     };
   });
 }
 
-function findBestEntryPoints(
+/**
+ * LÓGICA DE ENTRADA MEJORADA
+ * Busca: Intros limpias, Breaks instrumentales y Alineación con Drops
+ */
+function findSophisticatedEntryPoints(
   track: CancionAnalizada,
-  durationMs: number,
+  huecos: HuecoInstrumental[],
+  voces: SegmentoVoz[],
+  eventos: EventoClaveDJ[],
   estructura: EstructuraMusical[],
-  frases: number[],
-  letras: TranscripcionPalabra[],
+  frases: number[]
 ): CuePoint[] {
-  const windowEnd = durationMs * MAX_ENTRY_RATIO;
-  
-  const candidates: Array<{ pointMs: number; section?: EstructuraMusical; score: number; vocalGapMs: number }> = [];
+  const candidates: CuePoint[] = [];
+  const maxEntryMs = track.duracion_ms * MAX_ENTRY_POSITION;
 
-  // NUEVO: Evaluar el inicio absoluto de la canción (0ms o primera frase)
-  const veryStartMs = alignToPhrase(0, undefined, frases, 'forward');
-  if (veryStartMs < windowEnd) {
-    const { preVocalGapMs } = computeEntryVocalWindows(veryStartMs, letras);
+  // 1. ESTRATEGIA: INSTRUMENTAL GAPS (La más segura)
+  huecos.forEach(hueco => {
+    if (hueco.inicio_ms > maxEntryMs) return;
     
-    let vocalScore = 0;
-    if (preVocalGapMs >= 8000) {
-      vocalScore = 100;
-    } else if (preVocalGapMs >= CROSSFADE_MIN_MS) {
-      vocalScore = 60 + (40 * (preVocalGapMs - CROSSFADE_MIN_MS) / (8000 - CROSSFADE_MIN_MS));
-    } else if (preVocalGapMs >= MIN_VOCAL_GAP_MS) {
-      vocalScore = (preVocalGapMs / MIN_VOCAL_GAP_MS) * 60;
-    } else {
-      vocalScore = (preVocalGapMs / MIN_VOCAL_GAP_MS) * 30;
-    }
-    
-    // Bonus por ser el inicio natural de la canción
-    const baseWeight = 150; // Alto peso para el inicio
-    const finalScore = baseWeight * 0.3 + vocalScore * 0.7;
-    
-    candidates.push({ 
-      pointMs: veryStartMs, 
-      section: undefined, 
-      score: finalScore, 
-      vocalGapMs: Math.round(preVocalGapMs) 
-    });
-  }
+    // Alinear al inicio de frase más cercano DENTRO del hueco
+    const alignedStart = findNearestPhraseStart(hueco.inicio_ms, frases, 2000);
+    const effectiveStart = alignedStart ?? hueco.inicio_ms;
+    const safeDuration = hueco.fin_ms - effectiveStart;
 
-  estructura.forEach((section) => {
-    if (section.inicio_ms >= windowEnd) return;
-
-    const pointMs = alignToPhrase(section.inicio_ms, section, frases, 'forward');
-    const { preVocalGapMs } = computeEntryVocalWindows(pointMs, letras);
-
-    const baseWeight = (SECTION_WEIGHTS[section.tipo_seccion] ?? 1.0) * 100;
-    
-    let vocalScore = 0;
-    if (preVocalGapMs >= 8000) {
-      vocalScore = 100;
-    } else if (preVocalGapMs >= CROSSFADE_MIN_MS) {
-      vocalScore = 60 + (40 * (preVocalGapMs - CROSSFADE_MIN_MS) / (8000 - CROSSFADE_MIN_MS));
-    } else if (preVocalGapMs >= MIN_VOCAL_GAP_MS) {
-      vocalScore = (preVocalGapMs / MIN_VOCAL_GAP_MS) * 60;
-    } else {
-      vocalScore = (preVocalGapMs / MIN_VOCAL_GAP_MS) * 30;
-    }
-    
-    const finalScore = baseWeight * 0.3 + vocalScore * 0.7;
-    
-    candidates.push({ 
-      pointMs, 
-      section, 
-      score: finalScore, 
-      vocalGapMs: Math.round(preVocalGapMs) 
-    });
-  });
-
-  if (candidates.length === 0) {
-    const fallbackPoint = Math.min(durationMs * 0.1, 10000);
-    const fallbackAligned = alignToPhrase(fallbackPoint, undefined, frases, 'forward');
-    const { preVocalGapMs } = computeEntryVocalWindows(fallbackAligned, letras);
-    
-    candidates.push({
-      pointMs: fallbackAligned,
-      section: undefined,
-      score: 10,
-      vocalGapMs: Math.round(preVocalGapMs),
-    });
-  }
-
-  const uniquePoints = new Map<number, typeof candidates[0]>();
-  candidates.forEach(c => {
-    const existing = uniquePoints.get(c.pointMs);
-    if (!existing || c.score > existing.score) {
-      uniquePoints.set(c.pointMs, c);
-    }
-  });
-
-  const sorted = Array.from(uniquePoints.values()).sort((a, b) => b.score - a.score);
-  const topCandidates = sorted.slice(0, MAX_CANDIDATES);
-
-  while (topCandidates.length < MAX_CANDIDATES && topCandidates.length < sorted.length) {
-    topCandidates.push(sorted[topCandidates.length]);
-  }
-
-  if (topCandidates.length < MAX_CANDIDATES) {
-    for (let i = topCandidates.length; i < MAX_CANDIDATES; i++) {
-      const fallbackMs = (durationMs * (0.1 + (i * 0.05)));
-      const alignedMs = alignToPhrase(fallbackMs, undefined, frases, 'forward');
-      const { preVocalGapMs } = computeEntryVocalWindows(alignedMs, letras);
+    if (safeDuration >= MIN_MIX_WINDOW_MS) {
+      let score = 70; // Base score decente
       
-      topCandidates.push({
-        pointMs: alignedMs,
-        section: undefined,
-        score: 5 - i,
-        vocalGapMs: Math.round(preVocalGapMs),
+      // Bonificaciones
+      if (hueco.tipo === 'instrumental_puro') {
+        score *= WEIGHTS.INSTRUMENTAL_PURE;
+      }
+      if (alignedStart) {
+        score *= WEIGHTS.PHRASE_ALIGNMENT;
+      }
+      if (effectiveStart < 30000) {
+        score *= WEIGHTS.INTRO_BONUS; // Bonus por ser intro real
+      }
+
+      // Detectar si está en una intro estructural
+      const isInIntro = estructura.some(s => 
+        s.tipo_seccion === 'intro' && 
+        effectiveStart >= s.inicio_ms && 
+        effectiveStart <= s.fin_ms
+      );
+      
+      // Calcular alineación a grid de 8 compases
+      const gridAlignment = snapTo8BarGrid(effectiveStart, track.bpm, track.downbeats_ts_ms || []);
+
+      candidates.push({
+        trackId: track.id,
+        hash: track.hash_archivo,
+        title: track.titulo,
+        pointMs: effectiveStart,
+        type: 'IN',
+        strategy: isInIntro ? 'INTRO_SIMPLE' : 'BREAKDOWN_ENTRY',
+        score: Math.min(Math.round(score), 100),
+        safeDurationMs: safeDuration,
+        hasVocalOverlap: false,
+        alignedToPhrase: !!alignedStart,
+        alignedToBar: gridAlignment.alignedToBar,
+        alignedTo8BarGrid: gridAlignment.alignedTo8Bar,
+        sectionType: hueco.tipo,
+        suggestedCurve: 'LINEAR',
       });
     }
-  }
-
-  return topCandidates.map(c => ({
-    trackId: track.id,
-    hash: track.hash_archivo,
-    title: track.titulo,
-    type: 'IN' as const,
-    pointMs: c.pointMs,
-    sectionType: c.section?.tipo_seccion,
-    score: Math.round(c.score),
-    vocalMarginMs: c.vocalGapMs,
-  }));
-}
-
-function findBestExitPoints(
-  track: CancionAnalizada,
-  durationMs: number,
-  estructura: EstructuraMusical[],
-  frases: number[],
-  letras: TranscripcionPalabra[],
-): CuePoint[] {
-  const windowStart = durationMs * MIN_EXIT_RATIO;
-  
-  const candidates: Array<{ pointMs: number; section?: EstructuraMusical; score: number; vocalGapMs: number }> = [];
-
-  // NUEVO: Evaluar el final absoluto de la canción (última frase o durationMs)
-  const veryEndMs = alignToPhrase(durationMs, undefined, frases, 'backward');
-  if (veryEndMs > windowStart) {
-    const { sinceLastVocalMs } = computeExitVocalWindows(veryEndMs, durationMs, letras);
-    
-    let vocalScore = 0;
-    if (sinceLastVocalMs >= 8000) {
-      vocalScore = 100;
-    } else if (sinceLastVocalMs >= MIN_VOCAL_GAP_MS) {
-      vocalScore = 50 + (50 * (sinceLastVocalMs - MIN_VOCAL_GAP_MS) / (8000 - MIN_VOCAL_GAP_MS));
-    } else if (sinceLastVocalMs >= 500) {
-      vocalScore = (sinceLastVocalMs / MIN_VOCAL_GAP_MS) * 50;
-    } else {
-      vocalScore = (sinceLastVocalMs / MIN_VOCAL_GAP_MS) * 20;
-    }
-    
-    // Bonus por ser el final natural de la canción
-    const baseWeight = 150; // Alto peso para el final
-    const finalScore = baseWeight * 0.3 + vocalScore * 0.7;
-    
-    candidates.push({ 
-      pointMs: veryEndMs, 
-      section: undefined, 
-      score: finalScore, 
-      vocalGapMs: Math.round(sinceLastVocalMs) 
-    });
-  }
-
-  estructura.forEach((section) => {
-    if (section.fin_ms <= windowStart) return;
-
-    const isOutro = section.tipo_seccion === 'outro';
-    const candidateTime = isOutro ? section.inicio_ms : section.fin_ms;
-    const pointMs = alignToPhrase(candidateTime, section, frases, 'backward');
-    
-    const { sinceLastVocalMs } = computeExitVocalWindows(pointMs, durationMs, letras);
-
-    const baseWeight = (SECTION_WEIGHTS[section.tipo_seccion] ?? 1.0) * 100;
-    
-    let vocalScore = 0;
-    if (sinceLastVocalMs >= 8000) {
-      vocalScore = 100;
-    } else if (sinceLastVocalMs >= MIN_VOCAL_GAP_MS) {
-      vocalScore = 50 + (50 * (sinceLastVocalMs - MIN_VOCAL_GAP_MS) / (8000 - MIN_VOCAL_GAP_MS));
-    } else if (sinceLastVocalMs >= 500) {
-      vocalScore = (sinceLastVocalMs / MIN_VOCAL_GAP_MS) * 50;
-    } else {
-      vocalScore = (sinceLastVocalMs / MIN_VOCAL_GAP_MS) * 20;
-    }
-    
-    const finalScore = baseWeight * 0.3 + vocalScore * 0.7;
-    
-    candidates.push({ 
-      pointMs, 
-      section, 
-      score: finalScore, 
-      vocalGapMs: Math.round(sinceLastVocalMs) 
-    });
   });
 
-  if (candidates.length === 0) {
-    const fallbackPoint = durationMs - 5000;
-    const fallbackAligned = alignToPhrase(fallbackPoint, undefined, frases, 'backward');
-    const { sinceLastVocalMs } = computeExitVocalWindows(fallbackAligned, durationMs, letras);
+  // 2. ESTRATEGIA: EVENT ALIGNMENT (Impacto alto)
+  // Distinguir entre DROP_SWAP (con build-up) e IMPACT_ENTRY (entrada directa)
+  eventos.forEach(evento => {
+    // Calcular punto ideal de entrada (antes del evento para build-up)
+    const targetPoint = Math.max(0, evento.inicio_ms - PRE_EVENT_ROLLBACK_MS);
     
-    candidates.push({
-      pointMs: fallbackAligned,
-      section: undefined,
-      score: 10,
-      vocalGapMs: Math.round(sinceLastVocalMs),
-    });
-  }
+    // CASO A: Hay espacio suficiente para build-up → DROP_SWAP
+    if (targetPoint > IMPACT_ENTRY_THRESHOLD_MS && targetPoint <= maxEntryMs) {
+      // Alinear a grid de 8 compases para sincronía perfecta
+      const gridAlignment = snapTo8BarGrid(targetPoint, track.bpm, track.downbeats_ts_ms || []);
+      const finalPoint = gridAlignment.alignedMs;
 
-  const uniquePoints = new Map<number, typeof candidates[0]>();
-  candidates.forEach(c => {
-    const existing = uniquePoints.get(c.pointMs);
-    if (!existing || c.score > existing.score) {
-      uniquePoints.set(c.pointMs, c);
-    }
-  });
+      // Verificar colisión vocal durante el build-up
+      const vocalClash = checkVocalOverlap(finalPoint, evento.inicio_ms, voces);
+      const safeDuration = evento.inicio_ms - finalPoint;
 
-  const sorted = Array.from(uniquePoints.values()).sort((a, b) => b.score - a.score);
-  const topCandidates = sorted.slice(0, MAX_CANDIDATES);
+      if (safeDuration < MIN_MIX_WINDOW_MS) return;
 
-  while (topCandidates.length < MAX_CANDIDATES && topCandidates.length < sorted.length) {
-    topCandidates.push(sorted[topCandidates.length]);
-  }
-
-  if (topCandidates.length < MAX_CANDIDATES) {
-    for (let i = topCandidates.length; i < MAX_CANDIDATES; i++) {
-      const fallbackMs = durationMs - (5000 + (i * 10000));
-      const alignedMs = alignToPhrase(Math.max(fallbackMs, durationMs * 0.5), undefined, frases, 'backward');
-      const { sinceLastVocalMs } = computeExitVocalWindows(alignedMs, durationMs, letras);
+      let score = 90; // Score alto para drop swaps bien planeados
       
-      topCandidates.push({
-        pointMs: alignedMs,
-        section: undefined,
-        score: 5 - i,
-        vocalGapMs: Math.round(sinceLastVocalMs),
+      score *= WEIGHTS.EVENT_ALIGNMENT;
+      
+      if (vocalClash) {
+        score *= WEIGHTS.VOCAL_CLASH_PENALTY;
+      }
+      if (gridAlignment.alignedTo8Bar) {
+        score *= 1.15; // Bonus extra por alineación perfecta a 8 compases
+      }
+      
+      const strategy: CueStrategy = 
+        evento.evento === 'caida_de_bajo' ? 'DROP_SWAP' : 
+        evento.evento === 'melodia_iconica' ? 'BREAKDOWN_ENTRY' :
+        'EVENT_SYNC';
+
+      candidates.push({
+        trackId: track.id,
+        hash: track.hash_archivo,
+        title: track.titulo,
+        pointMs: finalPoint,
+        type: 'IN',
+        strategy,
+        score: Math.min(Math.round(score), 100),
+        safeDurationMs: safeDuration,
+        hasVocalOverlap: vocalClash,
+        alignedToPhrase: true,
+        alignedToBar: gridAlignment.alignedToBar,
+        alignedTo8BarGrid: gridAlignment.alignedTo8Bar,
+        eventLink: `Build-up to ${evento.evento} at ${Math.round(evento.inicio_ms / 1000)}s`,
+        sectionType: evento.evento,
+        suggestedCurve: strategy === 'DROP_SWAP' ? 'BASS_SWAP' : 'LINEAR',
       });
     }
-  }
-
-  return topCandidates.map(c => ({
-    trackId: track.id,
-    hash: track.hash_archivo,
-    title: track.titulo,
-    type: 'OUT' as const,
-    pointMs: c.pointMs,
-    sectionType: c.section?.tipo_seccion,
-    score: Math.round(c.score),
-    vocalMarginMs: c.vocalGapMs,
-  }));
-}
-
-function normalizeEstructura(raw: CancionAnalizada['estructura_ts']): EstructuraMusical[] {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-
-  return raw
-    .filter((section): section is EstructuraMusical =>
-      typeof section?.inicio_ms === 'number' &&
-      typeof section?.fin_ms === 'number' &&
-      typeof section?.tipo_seccion === 'string')
-    .map((section) => ({
-      ...section,
-      inicio_ms: clamp(section.inicio_ms, 0),
-      fin_ms: Math.max(clamp(section.fin_ms, 0), clamp(section.inicio_ms, 0)),
-    }))
-    .sort((a, b) => a.inicio_ms - b.inicio_ms);
-}
-
-function normalizeLetras(raw: CancionAnalizada['letras_ts']): TranscripcionPalabra[] {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-
-  return raw
-    .filter((word): word is TranscripcionPalabra =>
-      typeof word?.inicio_ms === 'number' && typeof word?.fin_ms === 'number')
-    .map((word) => ({
-      ...word,
-      inicio_ms: clamp(word.inicio_ms, 0),
-      fin_ms: Math.max(clamp(word.fin_ms, 0), clamp(word.inicio_ms, 0)),
-    }))
-    .sort((a, b) => a.inicio_ms - b.inicio_ms);
-}
-
-function alignToPhrase(
-  pointMs: number,
-  section: EstructuraMusical | undefined,
-  frases: number[],
-  direction: 'forward' | 'backward',
-): number {
-  if (!Array.isArray(frases) || frases.length === 0) {
-    return pointMs;
-  }
-
-  const sectionStart = section?.inicio_ms ?? pointMs;
-  const sectionEnd = section?.fin_ms ?? pointMs;
-
-  if (direction === 'forward') {
-    const candidate = frases.find((fraseMs) => fraseMs >= sectionStart && fraseMs <= sectionEnd);
-    if (typeof candidate === 'number') {
-      return candidate;
+    
+    // CASO B: El drop está muy temprano (< 5s) → IMPACT_ENTRY
+    else if (evento.inicio_ms <= IMPACT_ENTRY_THRESHOLD_MS && evento.inicio_ms >= 1000) {
+      // Entrada directa en el drop (para cortes secos/hard cuts)
+      const gridAlignment = snapTo8BarGrid(evento.inicio_ms, track.bpm, track.downbeats_ts_ms || []);
+      const entryPoint = gridAlignment.alignedMs;
+      
+      const vocalCheck = checkVocalOverlap(entryPoint, entryPoint + 2000, voces);
+      
+      let score = 65; // Score moderado (es arriesgado pero efectivo)
+      
+      if (!vocalCheck) score += 15; // Bonus si no hay voz inmediata
+      if (evento.evento === 'caida_de_bajo') score += 10; // Los drops funcionan bien
+      
+      candidates.push({
+        trackId: track.id,
+        hash: track.hash_archivo,
+        title: track.titulo,
+        pointMs: entryPoint,
+        type: 'IN',
+        strategy: 'IMPACT_ENTRY',
+        score: Math.min(Math.round(score), 100),
+        safeDurationMs: 2000, // Muy corto, es un impacto
+        hasVocalOverlap: vocalCheck,
+        alignedToPhrase: false,
+        alignedToBar: gridAlignment.alignedToBar,
+        alignedTo8BarGrid: gridAlignment.alignedTo8Bar,
+        eventLink: `Direct impact at ${evento.evento}`,
+        sectionType: evento.evento,
+        suggestedCurve: 'CUT', // Corte seco
+      });
     }
-    const next = frases.find((fraseMs) => fraseMs >= pointMs);
-    return typeof next === 'number' ? next : pointMs;
+  });
+
+  // 3. FALLBACK: Si no hay huecos ni eventos, usar estructura
+  if (candidates.length === 0) {
+    estructura.forEach(section => {
+      if (section.inicio_ms > maxEntryMs) return;
+      
+      const isGoodEntry = ['intro', 'solo_instrumental'].includes(section.tipo_seccion);
+      if (!isGoodEntry) return;
+
+      const alignedPoint = findNearestPhraseStart(section.inicio_ms, frases, 2000);
+      const finalPoint = alignedPoint ?? section.inicio_ms;
+      const vocalClash = checkVocalOverlap(finalPoint, section.fin_ms, voces);
+
+      let score = 50;
+      if (section.tipo_seccion === 'intro') score = 60;
+      if (!vocalClash) score += 20;
+      if (alignedPoint) score *= WEIGHTS.PHRASE_ALIGNMENT;
+      
+      // Calcular alineación a grid de 8 compases
+      const gridAlignment = snapTo8BarGrid(finalPoint, track.bpm, track.downbeats_ts_ms || []);
+
+      candidates.push({
+        trackId: track.id,
+        hash: track.hash_archivo,
+        title: track.titulo,
+        pointMs: finalPoint,
+        type: 'IN',
+        strategy: 'INTRO_SIMPLE',
+        score: Math.min(Math.round(score), 100),
+        safeDurationMs: section.fin_ms - finalPoint,
+        hasVocalOverlap: vocalClash,
+        alignedToPhrase: !!alignedPoint,
+        alignedToBar: gridAlignment.alignedToBar,
+        alignedTo8BarGrid: gridAlignment.alignedTo8Bar,
+        sectionType: section.tipo_seccion,
+        suggestedCurve: 'LINEAR',
+      });
+    });
   }
 
-  const reversed = [...frases].reverse();
-  const candidate = reversed.find((fraseMs) => fraseMs <= sectionEnd && fraseMs >= sectionStart);
-  if (typeof candidate === 'number') {
-    return candidate;
-  }
-  const prev = reversed.find((fraseMs) => fraseMs <= pointMs);
-  return typeof prev === 'number' ? prev : pointMs;
+  return candidates;
 }
 
-function computeEntryVocalWindows(pointMs: number, letras: TranscripcionPalabra[]) {
-  if (letras.length === 0) {
-    return {
-      preRollMs: pointMs,
-      preVocalGapMs: Number.POSITIVE_INFINITY,
-      firstVocalMs: null,
-    };
+/**
+ * LÓGICA DE SALIDA MEJORADA
+ * Busca: Outros, Final de Coros, Antes de Drops (para hacer switch)
+ */
+function findSophisticatedExitPoints(
+  track: CancionAnalizada,
+  huecos: HuecoInstrumental[],
+  voces: SegmentoVoz[],
+  eventos: EventoClaveDJ[],
+  estructura: EstructuraMusical[],
+  frases: number[]
+): CuePoint[] {
+  const candidates: CuePoint[] = [];
+  const minExitMs = track.duracion_ms * MIN_EXIT_POSITION;
+
+  // 1. ESTRATEGIA: OUTROS LIMPIOS (Huecos al final)
+  huecos.forEach(hueco => {
+    if (hueco.inicio_ms < minExitMs) return;
+
+    const alignedStart = findNearestPhraseStart(hueco.inicio_ms, frases, 2000);
+    const effectiveStart = alignedStart ?? hueco.inicio_ms;
+    const safeDuration = hueco.fin_ms - effectiveStart;
+
+    if (safeDuration >= MIN_MIX_WINDOW_MS) {
+      let score = 80;
+      
+      if (hueco.tipo === 'instrumental_puro') {
+        score *= WEIGHTS.INSTRUMENTAL_PURE;
+      }
+      if (alignedStart) {
+        score *= WEIGHTS.PHRASE_ALIGNMENT;
+      }
+      
+      // Bonus si está cerca del final
+      const proximityToEnd = (effectiveStart - minExitMs) / (track.duracion_ms - minExitMs);
+      if (proximityToEnd > 0.7) {
+        score *= WEIGHTS.OUTRO_BONUS;
+      }
+
+      // Detectar si está en outro estructural
+      const isInOutro = estructura.some(s => 
+        s.tipo_seccion === 'outro' && 
+        effectiveStart >= s.inicio_ms && 
+        effectiveStart <= s.fin_ms
+      );
+      
+      // Calcular alineación a grid de 8 compases
+      const gridAlignment = snapTo8BarGrid(effectiveStart, track.bpm, track.downbeats_ts_ms || []);
+      
+      candidates.push({
+        trackId: track.id,
+        hash: track.hash_archivo,
+        title: track.titulo,
+        pointMs: effectiveStart,
+        type: 'OUT',
+        strategy: isInOutro ? 'OUTRO_FADE' : 'BREAKDOWN_ENTRY',
+        score: Math.min(Math.round(score), 100),
+        safeDurationMs: safeDuration,
+        hasVocalOverlap: false,
+        alignedToPhrase: !!alignedStart,
+        alignedToBar: gridAlignment.alignedToBar,
+        alignedTo8BarGrid: gridAlignment.alignedTo8Bar,
+        sectionType: hueco.tipo,
+        suggestedCurve: 'LINEAR',
+      });
+    }
+  });
+
+  // 2. ESTRATEGIA: POST-CHORUS / PRE-DROP (Energy Switch)
+  eventos.forEach(evento => {
+    // Salir justo cuando empieza el evento (switch dramático)
+    const exitPoint = evento.inicio_ms;
+    
+    if (exitPoint < minExitMs) return;
+    
+    const alignedExit = findNearestPhraseStart(exitPoint, frases, 2000) ?? exitPoint;
+
+    // Mirar hacia atrás para ventana de mezcla
+    const windowBefore = Math.min(PRE_EVENT_ROLLBACK_MS, exitPoint);
+    const startMix = Math.max(0, alignedExit - windowBefore);
+    const vocalClash = checkVocalOverlap(startMix, alignedExit, voces);
+
+    let score = 75;
+    
+    if (evento.evento === 'caida_de_bajo') {
+      score = 90; // Switch en drop es PRO
+      score *= WEIGHTS.EVENT_ALIGNMENT;
+    }
+    
+    if (vocalClash) {
+      score *= 0.7; // Es difícil salir si están cantando
+    }
+    
+    if (alignedExit === exitPoint) {
+      score *= WEIGHTS.PHRASE_ALIGNMENT;
+    }
+    
+    // Calcular alineación a grid de 8 compases
+    const gridAlignment = snapTo8BarGrid(alignedExit, track.bpm, track.downbeats_ts_ms || []);
+
+    candidates.push({
+      trackId: track.id,
+      hash: track.hash_archivo,
+      title: track.titulo,
+      pointMs: alignedExit,
+      type: 'OUT',
+      strategy: 'DROP_SWAP',
+      score: Math.min(Math.round(score), 100),
+      safeDurationMs: windowBefore,
+      hasVocalOverlap: vocalClash,
+      alignedToPhrase: alignedExit === exitPoint,
+      alignedToBar: gridAlignment.alignedToBar,
+      alignedTo8BarGrid: gridAlignment.alignedTo8Bar,
+      eventLink: `Exit at ${evento.evento}`,
+      sectionType: evento.evento,
+      suggestedCurve: 'BASS_SWAP',
+    });
+  });
+
+  // 3. FALLBACK: Usar estructura
+  if (candidates.length === 0) {
+    estructura.forEach(section => {
+      if (section.fin_ms < minExitMs) return;
+      
+      const isGoodExit = ['outro', 'solo_instrumental'].includes(section.tipo_seccion);
+      if (!isGoodExit) return;
+
+      const targetPoint = section.tipo_seccion === 'outro' 
+        ? section.inicio_ms 
+        : section.fin_ms;
+        
+      const alignedPoint = findNearestPhraseStart(targetPoint, frases, 2000);
+      const finalPoint = alignedPoint ?? targetPoint;
+      
+      const windowBefore = Math.min(8000, finalPoint - section.inicio_ms);
+      const vocalClash = checkVocalOverlap(finalPoint - windowBefore, finalPoint, voces);
+
+      let score = 60;
+      if (section.tipo_seccion === 'outro') score = 70;
+      if (!vocalClash) score += 20;
+      if (alignedPoint) score *= WEIGHTS.PHRASE_ALIGNMENT;
+      
+      // Calcular alineación a grid de 8 compases
+      const gridAlignment = snapTo8BarGrid(finalPoint, track.bpm, track.downbeats_ts_ms || []);
+
+      candidates.push({
+        trackId: track.id,
+        hash: track.hash_archivo,
+        title: track.titulo,
+        pointMs: finalPoint,
+        type: 'OUT',
+        strategy: 'OUTRO_FADE',
+        score: Math.min(Math.round(score), 100),
+        safeDurationMs: windowBefore,
+        hasVocalOverlap: vocalClash,
+        alignedToPhrase: !!alignedPoint,
+        alignedToBar: gridAlignment.alignedToBar,
+        alignedTo8BarGrid: gridAlignment.alignedTo8Bar,
+        sectionType: section.tipo_seccion,
+        suggestedCurve: 'LINEAR',
+      });
+    });
   }
 
-  const firstWordAfter = letras.find((word) => word.inicio_ms >= pointMs);
+  return candidates;
+}
 
-  // Para puntos de entrada: lo importante es cuánto tiempo limpio tenemos DESPUÉS del punto
-  // hasta que empiece a cantar (para hacer el crossfade sin cortar voces)
-  const preVocalGapMs = firstWordAfter ? Math.max(0, firstWordAfter.inicio_ms - pointMs) : Number.POSITIVE_INFINITY;
-  const firstVocalMs = firstWordAfter?.inicio_ms ?? null;
+// --- UTILIDADES ---
+
+/**
+ * Calcula la alineación a grid de 8 compases (32 beats)
+ * Esta es la unidad fundamental de fraseo en música de baile electrónica
+ */
+function snapTo8BarGrid(
+  pointMs: number, 
+  bpm: number | null, 
+  downbeats: number[]
+): { alignedMs: number; alignedToBar: boolean; alignedTo8Bar: boolean } {
+  // Valores por defecto si no hay datos
+  if (!bpm || !downbeats || downbeats.length === 0) {
+    return { alignedMs: pointMs, alignedToBar: false, alignedTo8Bar: false };
+  }
+
+  const msPerBeat = 60000 / bpm;
+  const msPerBar = msPerBeat * 4; // 4 beats = 1 compás
+  const msPer8Bars = msPerBar * 8; // 32 beats = bloque de 8 compases
+
+  // Encontrar el primer downbeat
+  const firstDownbeat = downbeats[0] || 0;
+
+  // Calcular cuántos bloques de 8 compases han pasado
+  const relativeTime = pointMs - firstDownbeat;
+
+  const phrasesPassed = Math.round(relativeTime / msPer8Bars);
+  const aligned8BarMs = firstDownbeat + (phrasesPassed * msPer8Bars);
+
+  const barsPassed = Math.round(relativeTime / msPerBar);
+  const alignedBarMs = firstDownbeat + (barsPassed * msPerBar);
+
+  // Tolerancia: 2 beats por defecto (mejor perceptual)
+  const tolerance = msPerBeat * 2;
+  const distTo8Bar = Math.abs(pointMs - aligned8BarMs);
+  const distToBar = Math.abs(pointMs - alignedBarMs);
+
+  // Priorizar 8-bar si está cerca
+  if (distTo8Bar < tolerance) {
+    return { alignedMs: Math.max(0, aligned8BarMs), alignedToBar: true, alignedTo8Bar: true };
+  }
+
+  // Alinear al compás si está cerca
+  if (distToBar < tolerance) {
+    return { alignedMs: Math.max(0, alignedBarMs), alignedToBar: true, alignedTo8Bar: false };
+  }
+
+  return { alignedMs: Math.max(0, pointMs), alignedToBar: false, alignedTo8Bar: false };
+}
+
+/**
+ * Busca la frase más cercana al punto objetivo (snap to grid musical)
+ */
+function findNearestPhraseStart(
+  targetMs: number, 
+  phrases: number[], 
+  toleranceMs: number
+): number | null {
+  if (!phrases.length) return null;
   
-  // preRollMs ya no es relevante para el scoring, solo informativo
-  const lastWordBefore = [...letras].reverse().find((word) => word.fin_ms <= pointMs);
-  const preRollMs = Math.max(0, pointMs - (lastWordBefore?.fin_ms ?? 0));
+  const closest = phrases.reduce((prev, curr) => {
+    return Math.abs(curr - targetMs) < Math.abs(prev - targetMs) ? curr : prev;
+  });
 
-  return { preRollMs, preVocalGapMs, firstVocalMs };
+  return Math.abs(closest - targetMs) <= toleranceMs ? closest : null;
 }
 
-function computeExitVocalWindows(pointMs: number, durationMs: number, letras: TranscripcionPalabra[]) {
-  if (letras.length === 0) {
-    return {
-      sinceLastVocalMs: pointMs,
-      nextVocalGapMs: Number.POSITIVE_INFINITY,
-      nextVocalMs: null,
-    };
-  }
-
-  const lastWordBefore = [...letras].reverse().find((word) => word.fin_ms <= pointMs);
-  const firstWordAfter = letras.find((word) => word.inicio_ms >= pointMs);
-
-  const sinceLastVocalMs = Math.max(0, pointMs - (lastWordBefore?.fin_ms ?? 0));
-  const nextVocalGapMs = firstWordAfter ? Math.max(0, firstWordAfter.inicio_ms - pointMs) : Math.max(0, durationMs - pointMs);
-  const nextVocalMs = firstWordAfter ? firstWordAfter.inicio_ms : null;
-
-  return { sinceLastVocalMs, nextVocalGapMs, nextVocalMs };
+/**
+ * Verifica si hay solapamiento vocal en un rango de tiempo
+ */
+function checkVocalOverlap(
+  startMs: number, 
+  endMs: number, 
+  vocalSegments: SegmentoVoz[]
+): boolean {
+  return vocalSegments.some(seg => {
+    const overlaps = 
+      (seg.start_ms >= startMs && seg.start_ms < endMs) ||
+      (seg.end_ms > startMs && seg.end_ms <= endMs) ||
+      (seg.start_ms <= startMs && seg.end_ms >= endMs);
+    
+    return overlaps;
+  });
 }
 
-function clamp(value: number, min: number, max?: number): number {
-  if (!Number.isFinite(value)) {
-    return min;
+/**
+ * Normaliza arrays que pueden venir como JSON string o ya parseados
+ */
+function normalizeArray<T>(data: T[] | string | null | undefined): T[] {
+  if (!data) return [];
+  if (typeof data === 'string') {
+    try {
+      const parsed = JSON.parse(data);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
   }
-  const clamped = Math.max(min, value);
-  if (typeof max === 'number') {
-    return Math.min(clamped, max);
-  }
-  return clamped;
+  return Array.isArray(data) ? data : [];
+}
+
+function normalizeNumericArray(data: number[] | string | null | undefined): number[] {
+  const arr = normalizeArray<number>(data);
+  return arr.filter(v => typeof v === 'number' && Number.isFinite(v));
+}
+
+function normalizeEventos(data: EventoClaveDJ[] | string | null | undefined): EventoClaveDJ[] {
+  return normalizeArray<EventoClaveDJ>(data).filter(e => 
+    e && 
+    typeof e.inicio_ms === 'number' && 
+    typeof e.fin_ms === 'number' &&
+    typeof e.evento === 'string'
+  );
+}
+
+function normalizeEstructura(data: EstructuraMusical[] | string | null | undefined): EstructuraMusical[] {
+  return normalizeArray<EstructuraMusical>(data)
+    .filter(s => 
+      s && 
+      typeof s.inicio_ms === 'number' && 
+      typeof s.fin_ms === 'number' &&
+      typeof s.tipo_seccion === 'string'
+    )
+    .sort((a, b) => a.inicio_ms - b.inicio_ms);
 }

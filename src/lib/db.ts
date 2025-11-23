@@ -15,6 +15,17 @@ function getSqlClient() {
 
 export const sql = typeof window === 'undefined' ? getSqlClient() : null as any;
 
+export type SegmentoVoz = {
+  start_ms: number;
+  end_ms: number;
+};
+
+export type HuecoInstrumental = {
+  inicio_ms: number;
+  fin_ms: number;
+  tipo: 'instrumental_puro' | 'voz_principal_residuo';
+};
+
 export type CancionAnalizada = {
   id: string;
   hash_archivo: string;
@@ -38,6 +49,8 @@ export type CancionAnalizada = {
   analisis_contenido: AnalisisContenido | null;
   presencia_vocal_ts: PresenciaVocal[] | null;
   analisis_espectral: any | null;
+  segmentos_voz: SegmentoVoz[] | null;
+  huecos_analizados: HuecoInstrumental[] | null;
   fecha_procesado: Date;
 };
 

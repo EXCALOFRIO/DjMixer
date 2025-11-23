@@ -66,14 +66,21 @@ export async function POST(request: NextRequest) {
     console.log(`🎯 Buscando secuencia óptima de ${targetLength} canciones...`);
     const session = findOptimalSequence(tracks, mixPlans, targetLength, startTrackId);
 
-    if (!session) {
+    // Verificar si la sesión tiene warnings o está vacía
+    if (session.tracks.length === 0) {
       return NextResponse.json(
-        { error: 'No se pudo generar una secuencia viable' },
+        { 
+          error: 'No se pudo generar ninguna secuencia', 
+          warnings: session.warnings || []
+        },
         { status: 500 }
       );
     }
 
-    console.log(`✅ Secuencia generada con score: ${session.totalScore.toFixed(2)}`);
+    console.log(`✅ Secuencia generada con ${session.tracks.length} tracks, score: ${session.totalScore.toFixed(2)}`);
+    if (session.warnings && session.warnings.length > 0) {
+      console.warn('⚠️ Warnings:', session.warnings);
+    }
 
     // 5. Retornar resultado
     return NextResponse.json({
@@ -84,7 +91,6 @@ export async function POST(request: NextRequest) {
             id: st.track.id,
             hash: st.track.hash_archivo,
             title: st.track.titulo,
-            artist: st.track.artista,
             bpm: st.track.bpm,
             key: st.track.tonalidad_camelot,
             energy: st.track.energia,
@@ -94,14 +100,14 @@ export async function POST(request: NextRequest) {
             type: st.transition.type,
             exitPointMs: st.transition.exitPoint.pointMs,
             entryPointMs: st.transition.entryPoint.pointMs,
-            crossfadeDurationMs: st.transition.crossfadeDurationMs,
             score: st.transition.score,
-            description: st.transition.details.description,
+            description: st.transition.description,
           } : null,
           transitionScore: st.transitionScore,
         })),
         totalScore: session.totalScore,
         avgTransitionScore: session.avgTransitionScore,
+        warnings: session.warnings || [],
       },
     });
 

@@ -950,12 +950,17 @@ DATOS TÉCNICOS:
 - Energía RMS: ${perfilRmsFormateado}
 - BPM: ${params.analisisTecnico.bpm} | Energía: ${(params.analisisTecnico.energia * 100).toFixed(0)}%
 
+INSTRUCCIONES DE SEGURIDAD CRÍTICAS:
+1. ⛔ PROHIBIDO ALUCINAR LETRA: Si el audio es instrumental en una sección, NO inventes letra aunque conozcas la canción.
+2. ⛔ RESPETAR VAD: Solo genera palabras cuyos timestamps caigan DENTRO de los "Segmentos con voz" proporcionados arriba.
+3. Si una sección es instrumental, devuelve array vacío [] en palabras.
+
 TAREAS (devolver JSON):
 
 1. TRANSCRIPCIÓN (transcripcion.palabras):
    - Transcribe letra palabra por palabra
    - Timestamps exactos: inicio_ms, fin_ms
-   - Alinear con segmentos VAD cuando sea posible
+   - CRÍTICO: Solo en segmentos VAD detectados
    - Array vacío si es instrumental
 
 2. HUECOS (transcripcion.analisis_huecos):
@@ -1076,6 +1081,127 @@ IMPORTANTE: Sé rápido y preciso. Timestamps en milisegundos.`;
   } catch (e) {
     throw new Error('Respuesta JSON inválida de Gemini');
   }
+
+  // ==================================================================================
+  // 🛡️ FILTRO DE ALUCINACIONES - "Cúpula de Hierro"
+  // ==================================================================================
+  // Elimina palabras que Gemini haya inventado en zonas instrumentales
+  // Confianza: Análisis de señal matemático > LLM
+  
+  const TOLERANCIA_MS = 300; // Margen para palabras en el borde de segmentos
+  let palabrasOriginales = 0;
+  let palabrasEliminadas = 0;
+
+  if (Array.isArray(resultado.transcripcion?.palabras)) {
+    palabrasOriginales = resultado.transcripcion.palabras.length;
+    
+    resultado.transcripcion.palabras = resultado.transcripcion.palabras.filter((p: any) => {
+      const inicio = Number(p.inicio_ms);
+      const fin = Number(p.fin_ms);
+      
+      // Validar números
+      if (isNaN(inicio) || isNaN(fin)) return false;
+
+      // VERIFICACIÓN CONTRA VAD:
+      // ¿Esta palabra cae dentro de algún segmento donde detectamos energía vocal?
+      const caeEnZonaVocal = params.segmentosVoz.some(seg => {
+        const segInicio = seg.start_ms - TOLERANCIA_MS;
+        const segFin = seg.end_ms + TOLERANCIA_MS;
+
+        // Lógica de superposición:
+        // La palabra empieza dentro O termina dentro O engloba al segmento
+        return (inicio >= segInicio && inicio <= segFin) || 
+               (fin >= segInicio && fin <= segFin) ||
+               (inicio <= segInicio && fin >= segFin);
+      });
+
+      if (!caeEnZonaVocal) {
+        palabrasEliminadas++;
+        console.warn(`👻 Alucinación detectada: "${p.palabra}" en [${inicio}-${fin}ms] (Zona Instrumental)`);
+      }
+
+      return caeEnZonaVocal;
+    });
+    
+    if (palabrasEliminadas > 0) {
+      console.log(`🛡️  Filtro de alucinaciones: ${palabrasEliminadas}/${palabrasOriginales} palabras eliminadas`);
+    }
+  }
+
+  // Recalcular huecos basándose en palabras filtradas
+  const palabrasFiltradas = resultado.transcripcion?.palabras || [];
+  const huecosRecalculados: any[] = [];
+  
+  if (palabrasFiltradas.length > 0) {
+    // Ordenar palabras por tiempo
+    palabrasFiltradas.sort((a: any, b: any) => a.inicio_ms - b.inicio_ms);
+
+    // Hueco inicial (si la primera palabra empieza tarde)
+    if (palabrasFiltradas[0].inicio_ms > 4000) {
+      huecosRecalculados.push({
+        inicio_ms: 0,
+        fin_ms: palabrasFiltradas[0].inicio_ms,
+        tipo: 'instrumental_puro'
+      });
+    }
+
+    // Huecos intermedios
+    for (let i = 0; i < palabrasFiltradas.length - 1; i++) {
+      const finActual = palabrasFiltradas[i].fin_ms;
+      const inicioSiguiente = palabrasFiltradas[i + 1].inicio_ms;
+      const duracionHueco = inicioSiguiente - finActual;
+
+      if (duracionHueco > 3000) { // Solo huecos mayores a 3 segundos
+        huecosRecalculados.push({
+          inicio_ms: finActual,
+          fin_ms: inicioSiguiente,
+          tipo: 'instrumental_puro'
+        });
+      }
+    }
+    
+    // Hueco final
+    const ultimaPalabra = palabrasFiltradas[palabrasFiltradas.length - 1];
+    if (duracionMaxMs - ultimaPalabra.fin_ms > 4000) {
+      huecosRecalculados.push({
+        inicio_ms: ultimaPalabra.fin_ms,
+        fin_ms: duracionMaxMs,
+        tipo: 'instrumental_puro'
+      });
+    }
+  } else {
+    // Si no hay palabras (totalmente instrumental), todo es un hueco
+    huecosRecalculados.push({
+      inicio_ms: 0,
+      fin_ms: duracionMaxMs,
+      tipo: 'instrumental_puro'
+    });
+  }
+
+  // Mezclar tipos que Gemini detectó con tiempos reales
+  const huecosFinales = huecosRecalculados.map(huecoReal => {
+    // Buscar si Gemini clasificó este rango temporal
+    const opinionGemini = resultado.transcripcion?.analisis_huecos?.find((h: any) => {
+      const solapamiento = Math.max(huecoReal.inicio_ms, h.inicio_ms) < 
+                          Math.min(huecoReal.fin_ms, h.fin_ms);
+      return solapamiento;
+    });
+    
+    return {
+      ...huecoReal,
+      tipo: opinionGemini?.tipo || 'instrumental_puro',
+      descripcion: opinionGemini?.descripcion
+    };
+  });
+
+  // Reemplazar los huecos de Gemini con los recalculados
+  if (resultado.transcripcion) {
+    resultado.transcripcion.analisis_huecos = huecosFinales;
+  }
+
+  // ==================================================================================
+  // FIN DEL FILTRO DE ALUCINACIONES
+  // ==================================================================================
 
   // 🔒 VALIDACIÓN EXHAUSTIVA: Verificar TODOS los campos obligatorios
   const validaciones = {

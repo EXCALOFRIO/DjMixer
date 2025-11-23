@@ -1,205 +1,17 @@
-/**
- * Sistema de transiciones DJ
- * Cada tipo de transición define cómo mezclar dos canciones
- */
-
 import type { CancionAnalizada } from './db';
-import type { CuePoint } from './mix-planner';
+import type { CuePoint, CueStrategy, CrossfadeCurve } from './mix-planner';
 
 export interface TransitionResult {
-  type: string;
   exitPoint: CuePoint;
   entryPoint: CuePoint;
-  crossfadeDurationMs: number;
   score: number;
-  details: {
-    vocalOverlap: boolean;
-    alignedToPhrase: boolean;
-    description: string;
-  };
-}
-
-export abstract class MixTransition {
-  abstract readonly id: string;
-  abstract readonly name: string;
-  abstract readonly description: string;
-
-  /**
-   * Evalúa si esta transición es aplicable entre dos canciones
-   * y devuelve la mejor configuración posible con su puntuación
-   */
-  abstract evaluate(
-    trackA: CancionAnalizada,
-    exitPoints: CuePoint[],
-    trackB: CancionAnalizada,
-    entryPoints: CuePoint[]
-  ): TransitionResult | null;
-
-  /**
-   * Calcula la calidad de un crossfade basado en su duración
-   */
-  protected calculateCrossfadeScore(crossfadeMs: number, idealMs: number = 8000): number {
-    const MIN_CROSSFADE = 3000;
-    const MAX_CROSSFADE = 12000;
-
-    if (crossfadeMs < MIN_CROSSFADE || crossfadeMs > MAX_CROSSFADE) {
-      return 0;
-    }
-
-    // Puntuación máxima en el ideal, decae hacia los extremos
-    const deviation = Math.abs(crossfadeMs - idealMs);
-    const maxDeviation = Math.max(idealMs - MIN_CROSSFADE, MAX_CROSSFADE - idealMs);
-    return 100 * (1 - deviation / maxDeviation);
-  }
+  type: string;
+  description: string;
+  suggestedCurve?: CrossfadeCurve;
 }
 
 /**
- * TRANSICIÓN 1: Fade Out / Fade In Clásico
- * - No permite solapamiento de voces
- * - Alineado a frases musicales
- * - Duración del crossfade basada en márgenes vocales
- */
-export class ClassicFadeTransition extends MixTransition {
-  readonly id = 'classic-fade';
-  readonly name = 'Fade Out/In Clásico';
-  readonly description = 'Transición suave sin solapamiento de voces, alineada a frases';
-
-  evaluate(
-    trackA: CancionAnalizada,
-    exitPoints: CuePoint[],
-    trackB: CancionAnalizada,
-    entryPoints: CuePoint[]
-  ): TransitionResult | null {
-    let bestTransition: TransitionResult | null = null;
-    let bestScore = -1;
-
-    // Probar todas las combinaciones de puntos de salida/entrada
-    for (const exitPoint of exitPoints) {
-      for (const entryPoint of entryPoints) {
-        // Calcular duración del crossfade basada en márgenes vocales
-        // Usamos el mínimo para evitar cortar voces en cualquiera de los dos tracks
-        let crossfadeDurationMs = Math.min(
-          exitPoint.vocalMarginMs,
-          entryPoint.vocalMarginMs
-        );
-
-        // Validar que el crossfade sea viable
-        if (crossfadeDurationMs < 3000) {
-          continue; // Demasiado corto para un fade suave
-        }
-
-        if (crossfadeDurationMs > 12000) {
-          // Limitar a 12 segundos máximo si hay mucho espacio (o es infinito/instrumental)
-          crossfadeDurationMs = 12000;
-        }
-
-        // Calcular puntuación del crossfade
-        const crossfadeScore = this.calculateCrossfadeScore(crossfadeDurationMs);
-
-        // Calcular puntuación combinada de los puntos
-        // Los puntos ya tienen scores de 0-100 basados en calidad vocal + tipo de sección
-        const pointsQualityScore = (exitPoint.score + entryPoint.score) / 2;
-
-        // Puntuación final: calidad de puntos * calidad del crossfade
-        const finalScore = pointsQualityScore * (crossfadeScore / 100);
-
-        if (finalScore > bestScore) {
-          bestScore = finalScore;
-          bestTransition = {
-            type: this.id,
-            exitPoint,
-            entryPoint,
-            crossfadeDurationMs: Math.min(crossfadeDurationMs, 12000),
-            score: finalScore,
-            details: {
-              vocalOverlap: false, // Esta transición NUNCA solapa voces
-              alignedToPhrase: true, // Los puntos ya están alineados por alignToPhrase()
-              description: `Fade de ${(Math.min(crossfadeDurationMs, 12000) / 1000).toFixed(1)}s sin solapamiento vocal`,
-            },
-          };
-        }
-      }
-    }
-
-    return bestTransition;
-  }
-}
-
-/**
- * PLACEHOLDER PARA FUTURAS TRANSICIONES
- * Descomentar y implementar cuando estén listas
- */
-
-/*
-export class BeatMatchedTransition extends MixTransition {
-  readonly id = 'beatmatch';
-  readonly name = 'Beat Matching';
-  readonly description = 'Sincronización de ritmos con posible solapamiento vocal';
-
-  evaluate(
-    trackA: CancionAnalizada,
-    exitPoints: CuePoint[],
-    trackB: CancionAnalizada,
-    entryPoints: CuePoint[]
-  ): TransitionResult | null {
-    // TODO: Implementar beat matching
-    // - Permite solapamiento vocal si los BPMs están sincronizados
-    // - Mayor peso a downbeats_ts_ms para alineación perfecta
-    return null;
-  }
-}
-
-export class LoopTransition extends MixTransition {
-  readonly id = 'loop';
-  readonly name = 'Loop Transition';
-  readonly description = 'Crea un loop en el track saliente para extender la mezcla';
-
-  evaluate(
-    trackA: CancionAnalizada,
-    exitPoints: CuePoint[],
-    trackB: CancionAnalizada,
-    entryPoints: CuePoint[]
-  ): TransitionResult | null {
-    // TODO: Implementar loop transition
-    // - Identifica secciones repetibles en trackA (frases_ts_ms)
-    // - Extiende artificialmente la mezcla
-    return null;
-  }
-}
-
-export class QuickCutTransition extends MixTransition {
-  readonly id = 'quick-cut';
-  readonly name = 'Corte Rápido';
-  readonly description = 'Transición instantánea en momento de impacto (drop/break)';
-
-  evaluate(
-    trackA: CancionAnalizada,
-    exitPoints: CuePoint[],
-    trackB: CancionAnalizada,
-    entryPoints: CuePoint[]
-  ): TransitionResult | null {
-    // TODO: Implementar quick cut
-    // - Busca eventos DJ (drops, breaks) en ambos tracks
-    // - Corte instantáneo (crossfade < 100ms)
-    return null;
-  }
-}
-*/
-
-/**
- * Registro de todas las transiciones disponibles
- * Añadir nuevas transiciones aquí cuando se implementen
- */
-export const AVAILABLE_TRANSITIONS: MixTransition[] = [
-  new ClassicFadeTransition(),
-  // new BeatMatchedTransition(),
-  // new LoopTransition(),
-  // new QuickCutTransition(),
-];
-
-/**
- * Encuentra la mejor transición posible entre dos tracks
- * probando todos los tipos de transición disponibles
+ * Encuentra la mejor combinación posible entre los puntos de salida de A y entrada de B
  */
 export function findBestTransition(
   trackA: CancionAnalizada,
@@ -207,17 +19,111 @@ export function findBestTransition(
   trackB: CancionAnalizada,
   entryPoints: CuePoint[]
 ): TransitionResult | null {
-  let bestTransition: TransitionResult | null = null;
+  let bestResult: TransitionResult | null = null;
   let bestScore = -1;
 
-  for (const transitionType of AVAILABLE_TRANSITIONS) {
-    const result = transitionType.evaluate(trackA, exitPoints, trackB, entryPoints);
-
-    if (result && result.score > bestScore) {
-      bestScore = result.score;
-      bestTransition = result;
+  for (const exit of exitPoints) {
+    for (const entry of entryPoints) {
+      const evaluation = evaluateTransitionPoints(exit, entry);
+      
+      if (evaluation.score > bestScore) {
+        bestScore = evaluation.score;
+        bestResult = {
+          exitPoint: exit,
+          entryPoint: entry,
+          score: evaluation.score,
+          type: evaluation.type,
+          description: evaluation.description
+          , suggestedCurve: evaluation.suggestedCurve
+        };
+      }
     }
   }
 
-  return bestTransition;
+  // Fallback: Si no hay ninguna combinación decente, permitir una de "emergencia" con score bajo
+  if (!bestResult && exitPoints.length > 0 && entryPoints.length > 0) {
+    return {
+      exitPoint: exitPoints[0],
+      entryPoint: entryPoints[0],
+      score: 10,
+      type: 'CUT',
+      description: 'Corte de emergencia (sin compatibilidad clara)'
+      , suggestedCurve: 'CUT'
+    };
+  }
+
+  return bestResult;
+}
+
+function evaluateTransitionPoints(exit: CuePoint, entry: CuePoint): { score: number; type: string; description: string; suggestedCurve?: CrossfadeCurve } {
+  // 1. VETO: Choque de voces (regla de oro)
+  if (exit.hasVocalOverlap && entry.hasVocalOverlap) {
+    return { score: 0, type: 'CLASH', description: 'Choque vocal' };
+  }
+
+  let score = 0;
+  let type = 'MIX';
+  let suggestedCurve: CrossfadeCurve | undefined = undefined;
+  
+  // 2. Matriz de Compatibilidad de Estrategias
+  const strategyScore = getStrategyCompatibility(exit.strategy, entry.strategy);
+  score += strategyScore;
+
+  // 3. Duración segura (cuánto tiempo tenemos para mezclar)
+  const overlapTime = Math.min(exit.safeDurationMs, entry.safeDurationMs);
+  
+  if (overlapTime > 16000) score += 10; // Muy cómodo
+  else if (overlapTime < 4000) score -= 20; // Muy apretado (rush mixing)
+
+  // 4. Bonificación por Alineación de Frases
+  if (exit.alignedToPhrase && entry.alignedToPhrase) {
+    score += 15;
+  }
+
+  // 5. Penalización por Drop Swap al inicio (Observación del usuario)
+  // Si la entrada es DROP_SWAP pero el punto es < 5 segundos, es raro
+  if (entry.strategy === 'DROP_SWAP' && entry.pointMs < 5000) {
+    score -= 30; // Penalizar fuertemente, probablemente sea un falso positivo
+  }
+
+  // Normalizar score entre 0 y 100
+  // Proponer curva sugerida: preferir la indicada en entry/exit si existe
+  if (!suggestedCurve) {
+    if (entry.suggestedCurve) suggestedCurve = entry.suggestedCurve;
+    else if (exit.suggestedCurve) suggestedCurve = exit.suggestedCurve;
+    else if (exit.strategy === 'DROP_SWAP' && entry.strategy === 'DROP_SWAP') suggestedCurve = 'BASS_SWAP';
+    else if (entry.strategy === 'IMPACT_ENTRY' || exit.strategy === 'IMPACT_ENTRY') suggestedCurve = 'CUT';
+    else if (exit.strategy === 'OUTRO_FADE' && entry.strategy === 'INTRO_SIMPLE') suggestedCurve = 'LINEAR';
+    else suggestedCurve = 'LINEAR';
+  }
+
+  return { 
+    score: Math.min(Math.max(score, 0), 100),
+    type: determineMixType(exit.strategy, entry.strategy),
+    description: `${exit.strategy} ➔ ${entry.strategy}`
+    , suggestedCurve
+  };
+}
+
+function getStrategyCompatibility(exit: CueStrategy, entry: CueStrategy): number {
+  // Matriz de decisiones DJ
+  if (exit === 'DROP_SWAP' && entry === 'DROP_SWAP') return 100; // Energía máxima
+  if (exit === 'OUTRO_FADE' && entry === 'INTRO_SIMPLE') return 90; // Clásico y seguro
+  if (exit === 'DROP_SWAP' && entry === 'BREAKDOWN_ENTRY') return 80; // Mantener flow
+  if (exit === 'OUTRO_FADE' && entry === 'BREAKDOWN_ENTRY') return 70; // Aceptable
+  if (exit === 'BREAKDOWN_ENTRY' && entry === 'INTRO_SIMPLE') return 75; // Natural
+  if (exit === 'EVENT_SYNC' && entry === 'EVENT_SYNC') return 85; // Eventos alineados
+  if (exit === 'LOOP_ANCHOR' && entry === 'INTRO_SIMPLE') return 65; // Loop extendido
+  
+  // Combinaciones raras
+  if (exit === 'OUTRO_FADE' && entry === 'DROP_SWAP') return 30; // Demasiado salto de energía
+  if (exit === 'DROP_SWAP' && entry === 'INTRO_SIMPLE') return 40; // Matar la energía
+  
+  return 50; // Neutro
+}
+
+function determineMixType(exit: CueStrategy, entry: CueStrategy): string {
+  if (exit === 'DROP_SWAP' && entry === 'DROP_SWAP') return 'DOUBLE_DROP';
+  if (exit.includes('FADE') || entry.includes('INTRO')) return 'LONG_MIX';
+  return 'QUICK_MIX';
 }
