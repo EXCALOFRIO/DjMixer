@@ -31,6 +31,7 @@ export type CancionAnalizada = {
   downbeats_ts_ms: number[] | null;
   beats_ts_ms: number[] | null;
   frases_ts_ms: number[] | null;
+  transientes_ritmicos_ts_ms: number[] | null;
   cue_points: CuePoint[] | null;
   mix_in_point: number | null;
   mix_out_point: number | null;
@@ -74,6 +75,15 @@ export type AnalisisContenido = {
     evolucion_emocional: string;
   };
   eventos_clave_dj: EventoClaveDJ[];
+  diagnostico_tecnico?: {
+    resumen_segmentos_voz: string;
+    segmentos_fuera_vad?: number;
+    perfil_energia_resumen?: string;
+    energia_promedio?: number;
+    energia_picos_ms?: number[];
+    energia_valles_ms?: number[];
+    huecos_resumen?: string;
+  };
 };
 
 export type EventoClaveDJ = {

@@ -5,11 +5,12 @@ import BackgroundVisualizer from "@/components/background-visualizer";
 import Header from "@/components/layout/header";
 import { FileImporter } from "@/components/music/file-importer";
 import { PlaybackInterface } from "@/components/music/playback-interface";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import * as musicMetadata from "music-metadata-browser";
 import type { CancionAnalizada } from "@/lib/db";
+import type { MixPlanEntry } from "@/lib/mix-planner";
 
 export type Track = {
   file: File;
@@ -19,6 +20,7 @@ export type Track = {
   artwork: string | null;
   duration: number;
   url: string;
+  hash: string | null;
   analisis?: CancionAnalizada | null;
 };
 
@@ -27,7 +29,10 @@ export default function Home() {
   const [volume, setVolume] = useState(0.7);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [mixPlan, setMixPlan] = useState<MixPlanEntry[] | null>(null);
+  const [mixSequence, setMixSequence] = useState<any | null>(null);
   const { toast } = useToast();
+  const mixPlanHashRef = useRef<string | null>(null);
 
   const fetchAlbumArtFromAPI = async (artist: string, album: string): Promise<string | null> => {
     try {
@@ -87,6 +92,11 @@ export default function Home() {
       const url = URL.createObjectURL(file);
       const metadato = metadatosRapidos[i];
 
+      const hash = metadato?.hash || null;
+      const analisisExistente = metadato?.analizado && metadato?.hash_archivo
+        ? (metadato as CancionAnalizada)
+        : null;
+
       try {
         const metadata = await musicMetadata.parseBlob(file);
         const { common } = metadata;
@@ -114,7 +124,8 @@ export default function Home() {
           artwork,
           duration: metadato?.duracion_ms ? metadato.duracion_ms / 1000 : 0,
           url,
-          analisis: metadato?.analizado ? metadato : null,
+          hash,
+          analisis: analisisExistente,
         };
 
         newTracks.push(track);
@@ -128,59 +139,202 @@ export default function Home() {
 
     setTracks((prev) => [...prev, ...newTracks]);
 
-    // PASO 3: Análisis completo en segundo plano (solo para los que no están analizados)
+    // PASO 3: Análisis PARALELO REAL con Promise.all
     const tracksParaAnalizar = newTracks.filter(track => !track.analisis);
     
     if (tracksParaAnalizar.length > 0) {
-      console.log('🤖 Analizando', tracksParaAnalizar.length, 'canciones con Gemini...');
+      console.log(`🚀 Analizando ${tracksParaAnalizar.length} canciones en PARALELO...`);
+      console.log(`   ⚡ Essentia: máx 10 simultáneas`);
+      console.log(`   🤖 Gemini: máx 25 simultáneas`);
       
-      const MAX_CONCURRENT = 5;
-      let analizadosCount = 0;
-
-      for (let i = 0; i < tracksParaAnalizar.length; i += MAX_CONCURRENT) {
-        const batch = tracksParaAnalizar.slice(i, i + MAX_CONCURRENT);
+      // Advertencia para lotes muy grandes
+      if (tracksParaAnalizar.length > 50) {
+        console.warn(`⚠️ ADVERTENCIA: ${tracksParaAnalizar.length} canciones es un lote grande.`);
+        console.warn(`   Considera procesar en grupos de 50 para mejor estabilidad.`);
+      }
+      
+      try {
+        // 1️⃣ ANÁLISIS ESSENTIA + GEMINI - PIPELINE PARALELO REAL
+        console.log('\n📊 Lanzando análisis Essentia + Gemini en pipeline...');
+        console.log('   ⚡ Cada canción lanza Gemini inmediatamente tras Essentia');
         
-        await Promise.all(
-          batch.map(async (track, batchIndex) => {
-            const globalIndex = i + batchIndex;
-            
-            // Delay progresivo
-            if (globalIndex > 0) {
-              const delay = Math.min(globalIndex * 2000, 10000);
-              await new Promise(resolve => setTimeout(resolve, delay));
-            }
+        // Obtener configuración de Gemini
+        let MAX_GEMINI_CONCURRENTES = 25;
+        try {
+          const configResp = await fetch('/api/gemini-config');
+          if (configResp.ok) {
+            const configData = await configResp.json();
+            MAX_GEMINI_CONCURRENTES = configData.maxParallelRequests || 25;
+          }
+        } catch (err) {
+          console.log('⚠️ Config Gemini no disponible, usando 25 por defecto');
+        }
 
-            try {
+        // Límites de concurrencia
+        const MAX_ESSENTIA_CONCURRENTES = 10; // Limitar Essentia para no saturar servidor
+        let essentiaEnCurso = 0;
+        let geminiEnCurso = 0;
+        
+        const ejecutarEssentiaConLimite = async (fn: () => Promise<any>) => {
+          while (essentiaEnCurso >= MAX_ESSENTIA_CONCURRENTES) {
+            await new Promise(resolve => setTimeout(resolve, 200));
+          }
+          essentiaEnCurso++;
+          try {
+            return await fn();
+          } finally {
+            essentiaEnCurso--;
+          }
+        };
+        
+        const ejecutarGeminiConLimite = async (fn: () => Promise<void>) => {
+          while (geminiEnCurso >= MAX_GEMINI_CONCURRENTES) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          geminiEnCurso++;
+          try {
+            await fn();
+          } finally {
+            geminiEnCurso--;
+          }
+        };
+
+        const promesasPipeline = tracksParaAnalizar.map(async (track, index) => {
+          const numActual = index + 1;
+          
+          // PASO 1: Essentia (con límite de concurrencia)
+          try {
+            const data = await ejecutarEssentiaConLimite(async () => {
               const formData = new FormData();
               formData.append('file', track.file);
-              
+
               const response = await fetch('/api/analyze', {
                 method: 'POST',
                 body: formData,
               });
-              
-              if (response.ok) {
-                const analisis: CancionAnalizada = await response.json();
-                
-                // Actualizar el track con el análisis
-                setTracks(prev => prev.map(t => 
-                  t.url === track.url ? { ...t, analisis } : t
-                ));
 
-                toast({
-                  title: "Canción analizada",
-                  description: `${analisis.titulo} - BPM: ${analisis.bpm?.toFixed(1)}`,
-                });
+              if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ error: 'Error desconocido' }));
+                const errorMsg = errorData.error || `HTTP ${response.status}`;
+                console.error(`   ❌ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Essentia falló: ${errorMsg}`);
+                throw new Error(errorMsg);
               }
-            } catch (error) {
-              console.error('Error analizando:', track.title, error);
+
+              return await response.json();
+            });
+            
+            if (!data || !data.analisis) {
+              console.error(`   ❌ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Respuesta sin análisis`);
+              return { track, essentiaData: null, geminiSuccess: false };
+            }
+            
+            console.log(`   ✅ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Essentia OK`);
+
+            // Actualizar track inmediatamente con datos de Essentia
+            setTracks(prev => prev.map(t => 
+              t.file.name === track.file.name
+                ? {
+                    ...t,
+                    hash: data.hash,
+                    duration: data.analisis.duracion_ms ? data.analisis.duracion_ms / 1000 : t.duration,
+                    analisis: data.analisis as CancionAnalizada
+                  }
+                : t
+            ));
+
+            // PASO 2: Gemini (solo si no viene de caché)
+            if (!data.fromCache && data.hash) {
+              await ejecutarGeminiConLimite(async () => {
+                try {
+                  // Enviar el archivo MP3 completo (no solo el hash)
+                  const formData = new FormData();
+                  formData.append('file', track.file); // ⚠️ Campo correcto: 'file'
+                  formData.append('hash', data.hash);
+
+                  const geminiResp = await fetch('/api/enrich-gemini', {
+                    method: 'POST',
+                    body: formData // FormData incluye el archivo
+                  });
+
+                  if (geminiResp.ok) {
+                    const geminiData = await geminiResp.json();
+                    
+                    setTracks(prev => prev.map(t => 
+                      t.hash === data.hash && t.analisis
+                        ? {
+                            ...t,
+                            analisis: {
+                              ...t.analisis,
+                              genero: geminiData.gemini?.genero,
+                              subgenero: geminiData.gemini?.subgenero,
+                              emocion_principal: geminiData.gemini?.emocion_principal,
+                              intensidad_emocional: geminiData.gemini?.intensidad_emocional
+                            } as CancionAnalizada
+                          }
+                        : t
+                    ));
+
+                    console.log(`   🤖 [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Gemini OK`);
+                  } else {
+                    console.error(`   ⚠️ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Gemini falló`);
+                  }
+                } catch (error) {
+                  console.error(`   ⚠️ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Error Gemini:`, error);
+                }
+              });
             }
 
-            analizadosCount++;
-            setUploadProgress(50 + (analizadosCount / tracksParaAnalizar.length) * 50);
-          })
-        );
+            return { track, essentiaData: data, geminiSuccess: data.fromCache ? null : true };
+
+          } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : 'Error de red';
+            console.error(`   ❌ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - ${errorMsg}`);
+            return { track, essentiaData: null, geminiSuccess: false };
+          }
+        });
+
+        // Esperar a que TODAS terminen (pero ya se van procesando en paralelo)
+        const resultados = await Promise.all(promesasPipeline);
+        
+        const exitosos = resultados.filter(r => r.essentiaData);
+        const geminiExitosos = resultados.filter(r => r.geminiSuccess === true);
+        
+        console.log(`\n✅ Pipeline completado:`);
+        console.log(`   📊 Essentia: ${exitosos.length}/${tracksParaAnalizar.length}`);
+        console.log(`   🤖 Gemini: ${geminiExitosos.length}/${resultados.filter(r => r.essentiaData && !r.essentiaData.fromCache).length}`);
+        
+        setUploadProgress(100);
+        
+        // Notificar resultado final
+        const exitososTotal = exitosos.length;
+        const falliosTotal = tracksParaAnalizar.length - exitososTotal;
+        
+        if (falliosTotal > 0) {
+          toast({
+            title: "Análisis completado con errores",
+            description: `${exitososTotal} canciones analizadas, ${falliosTotal} fallaron`,
+            variant: "destructive"
+          });
+        } else {
+          toast({
+            title: "Análisis completado",
+            description: `${exitososTotal} canciones analizadas exitosamente`,
+          });
+        }
+
+      } catch (error) {
+        console.error('Error crítico en análisis:', error);
+        toast({
+          title: "Error en el análisis",
+          description: "Ocurrió un error inesperado durante el análisis",
+          variant: "destructive",
+        });
       }
+
+      setUploadProgress(100);
+    } else {
+      console.log('✅ Todas las canciones ya estaban analizadas (caché)');
+      setUploadProgress(100);
     }
 
     setIsUploading(false);
@@ -198,9 +352,93 @@ export default function Home() {
   // Mostrar importer solo si no hay tracks
   const showImporter = tracks.length === 0;
   
-  // Mostrar player solo si hay tracks Y todos están analizados (o si no estamos subiendo)
-  const todosAnalizados = tracks.length > 0 && tracks.every(t => t.analisis !== undefined);
-  const showPlayer = todosAnalizados && !isUploading;
+  // Mostrar player solo si hay tracks Y todos están analizados Y tenemos la secuencia
+  const todosAnalizados = tracks.length > 0 && tracks.every(t => Boolean(t.analisis && t.analisis.hash_archivo));
+  const showPlayer = todosAnalizados && !isUploading && mixSequence !== null;
+
+  useEffect(() => {
+    if (!todosAnalizados) {
+      setMixPlan(null);
+      setMixSequence(null);
+      mixPlanHashRef.current = null;
+      return;
+    }
+
+    const hashes = tracks
+      .map(track => track.analisis?.hash_archivo || track.hash)
+      .filter((hash): hash is string => typeof hash === 'string' && hash.length > 0);
+
+    if (hashes.length === 0) {
+      return;
+    }
+
+    const hashKey = hashes.join('|');
+    if (mixPlanHashRef.current === hashKey) {
+      return;
+    }
+
+    mixPlanHashRef.current = hashKey;
+
+    // PASO 1: Generar mix plan
+    console.log('📊 Generando mix plan...');
+    fetch('/api/mix-plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hashes }),
+    })
+      .then(async response => {
+        if (!response.ok) {
+          throw new Error('mix-plan-error');
+        }
+        return response.json() as Promise<{ plan: MixPlanEntry[] }>;
+      })
+      .then(({ plan }) => {
+        setMixPlan(plan);
+        console.log('✅ Mix plan calculado con top 5 puntos de entrada/salida por canción');
+        
+        toast({
+          title: "Mix Plan Generado",
+          description: `${plan.length} canciones con puntos de entrada/salida identificados`,
+        });
+
+        // PASO 2: Ejecutar algoritmo A* para secuenciar
+        console.log('🎯 Ejecutando algoritmo A* para secuenciar...');
+        return fetch('/api/mix-sequence', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            hashes,
+            sessionLength: Math.min(hashes.length, 10) // Máximo 10 canciones en la secuencia
+          }),
+        });
+      })
+      .then(async response => {
+        if (!response.ok) {
+          throw new Error('mix-sequence-error');
+        }
+        return response.json();
+      })
+      .then(({ session }) => {
+        setMixSequence(session);
+        console.log('✅ Secuencia A* generada:', session);
+        console.log(`   📈 Score total: ${session.totalScore.toFixed(2)}`);
+        console.log(`   📊 Score promedio transiciones: ${session.avgTransitionScore.toFixed(2)}`);
+        
+        toast({
+          title: "Secuencia Optimizada Generada",
+          description: `${session.tracks.length} canciones ordenadas (Score: ${session.totalScore.toFixed(0)}/100)`,
+        });
+      })
+      .catch((error) => {
+        mixPlanHashRef.current = null;
+        console.error('❌ Error generando mix plan o secuencia:', error);
+        toast({
+          title: "Error",
+          description: "No se pudo generar la secuencia optimizada",
+          variant: "destructive",
+        });
+      });
+  }, [todosAnalizados, tracks, toast]);
 
   return (
     <>
@@ -212,7 +450,7 @@ export default function Home() {
           <div className={cn("absolute inset-0 flex items-center justify-center transition-opacity duration-500",
             showPlayer ? 'opacity-100' : 'opacity-0 pointer-events-none'
           )}>
-            {showPlayer && <PlaybackInterface tracks={tracks} volume={volume} />}
+            {showPlayer && <PlaybackInterface tracks={tracks} volume={volume} mixPlan={mixPlan ?? undefined} mixSequence={mixSequence} />}
           </div>
 
           <div className={cn("absolute inset-0 flex items-center justify-center transition-opacity duration-500",

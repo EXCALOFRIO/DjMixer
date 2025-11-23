@@ -64,6 +64,7 @@ async function initDatabase() {
         downbeats_ts_ms JSONB,
         beats_ts_ms JSONB,
         frases_ts_ms JSONB,
+        transientes_ritmicos_ts_ms JSONB,
         compas JSONB,
         cue_points JSONB,
         mix_in_point INTEGER,

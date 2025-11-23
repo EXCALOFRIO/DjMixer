@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Enrich Gemini</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #fff;
+        }
+        .container {
+            background: #2a2a2a;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        h1 {
+            color: #60a5fa;
+            margin-top: 0;
+        }
+        .muted {
+            color: #94a3b8;
+            margin-bottom: 10px;
+        }
+        input[type="file"] {
+            display: block;
+            margin: 20px 0;
+            padding: 10px;
+            background: #3a3a3a;
+            border: 2px solid #4a4a4a;
+            border-radius: 6px;
+            color: #fff;
+            width: 100%;
+        }
+        button {
+            background: #60a5fa;
+            color: #fff;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: #3b82f6;
+        }
+        button:disabled {
+            background: #4a4a4a;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            background: #3a3a3a;
+            border-radius: 6px;
+            border-left: 4px solid #60a5fa;
+        }
+        .error {
+            border-left-color: #ef4444;
+        }
+        .success {
+            border-left-color: #10b981;
+        }
+        pre {
+            background: #1a1a1a;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 12px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        details {
+            margin-top: 20px;
+            background: #242424;
+            border-radius: 8px;
+            padding: 16px;
+            border: 1px solid #333;
+        }
+        details summary {
+            cursor: pointer;
+            font-weight: 600;
+            margin-bottom: 12px;
+            font-size: 18px;
+        }
+        details h3 {
+            margin-top: 16px;
+            margin-bottom: 8px;
+            color: #61dafb;
+            font-size: 16px;
+        }
+        details h3:first-of-type {
+            margin-top: 8px;
+        }
+        .letra {
+            background: #1a1a1a;
+            padding: 20px;
+            border-radius: 6px;
+            margin-top: 20px;
+            line-height: 1.8;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎵 Test Enrich Gemini API</h1>
+        <p>Sube un archivo MP3 para obtener transcripción, letra y análisis completo de Gemini.</p>
+        <p class="muted">Ahora el endpoint también acepta JSON con <code>audio_base64</code>, <code>audio_url</code> o solo <code>hash</code> (si ya subiste el archivo y quedó en caché).</p>
+        
+        <input type="file" id="audioFile" accept="audio/*">
+        <button id="uploadBtn" onclick="analyzeAudio()">📤 Analizar con Gemini</button>
+        
+        <div id="status"></div>
+        <div id="result"></div>
+
+        <details>
+            <summary>📦 Ejemplos rápidos (JSON / curl)</summary>
+            
+            <h3>🎯 Flujo de Gemini Audio</h3>
+            <p class="muted">
+                <strong>Importante:</strong> Gemini no guarda archivos permanentemente. El endpoint:
+                <br>1️⃣ Recibe/descarga el audio
+                <br>2️⃣ Lo sube a Gemini Files API (temporal)
+                <br>3️⃣ Obtiene un <code>file.uri</code> que usa para análisis
+                <br>4️⃣ Elimina el archivo de Gemini tras completar
+                <br>5️⃣ Cachea localmente para reutilizar (evita re-enviar bytes, pero sí re-sube a Gemini)
+            </p>
+
+            <h3>📤 Opción 1: Audio inline (base64)</h3>
+            <pre><code>{
+  "audio_base64": "data:audio/mpeg;base64,//uQxAAAAAAAAAAAAAAA...",
+  "fileName": "demo.mp3"
+}</code></pre>
+            <p>curl:</p>
+            <pre><code>curl -X POST http://localhost:9002/api/enrich-gemini \
+  -H "Content-Type: application/json" \
+  -d '{"audio_base64": "data:audio/mpeg;base64,AAA...", "fileName": "demo.mp3"}'</code></pre>
+
+            <h3>🌐 Opción 2: Descarga remota</h3>
+            <pre><code>{
+  "audio_url": "https://example.com/track.mp3",
+  "fileName": "track.mp3"
+}</code></pre>
+
+            <h3>♻️ Opción 3: Reutilizar hash (usa caché local)</h3>
+            <pre><code>{
+  "hash": "abc123def456...",
+  "fileName": "demo.mp3"
+}</code></pre>
+            <p class="muted">
+                ⚠️ El hash solo busca en <strong>caché local</strong> (.cache/gemini-audio/).
+                <br>Si no existe, recibirás error <code>400</code>. Debes enviar primero el audio vía base64/url/FormData.
+                <br>Gemini <strong>NO</strong> almacena archivos por hash; cada análisis requiere re-upload a Gemini.
+            </p>
+
+            <h3>📋 FormData (modo tradicional)</h3>
+            <pre><code>const formData = new FormData();
+formData.append('file', audioFile);
+fetch('/api/enrich-gemini', { method: 'POST', body: formData });</code></pre>
+        </details>
+    </div>
+
+    <script>
+        async function analyzeAudio() {
+            const fileInput = document.getElementById('audioFile');
+            const statusDiv = document.getElementById('status');
+            const resultDiv = document.getElementById('result');
+            const uploadBtn = document.getElementById('uploadBtn');
+            
+            if (!fileInput.files[0]) {
+                statusDiv.innerHTML = '<div class="status error">❌ Selecciona un archivo de audio</div>';
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            
+            try {
+                uploadBtn.disabled = true;
+                statusDiv.innerHTML = '<div class="status">⏳ Subiendo archivo a Gemini...</div>';
+                resultDiv.innerHTML = '';
+                
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const response = await fetch('http://localhost:9002/api/enrich-gemini', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    statusDiv.innerHTML = '<div class="status success">✅ Análisis completado</div>';
+                    
+                    const letra = data.gemini.transcripcion.letra_completa;
+                    const palabras = data.gemini.transcripcion.palabras.length;
+                    const estructura = data.gemini.estructura.length;
+                    const huecos = data.gemini.huecos.length;
+                    
+                    resultDiv.innerHTML = `
+                        <h2>📊 Resumen</h2>
+                        <p><strong>Hash:</strong> ${data.hash}</p>
+                        <p><strong>Palabras transcritas:</strong> ${palabras}</p>
+                        <p><strong>Secciones estructurales:</strong> ${estructura}</p>
+                        <p><strong>Huecos analizados:</strong> ${huecos}</p>
+                        
+                        <h2>🎤 Letra Completa</h2>
+                        <div class="letra">${letra || '<em>Sin letra detectada (instrumental)</em>'}</div>
+                        
+                        <h2>🎨 Tema</h2>
+                        <p><strong>Resumen:</strong> ${data.gemini.tema.resumen}</p>
+                        <p><strong>Emoción:</strong> ${data.gemini.tema.emocion}</p>
+                        <p><strong>Palabras clave:</strong> ${data.gemini.tema.palabras_clave.join(', ')}</p>
+                        
+                        <h2>📝 JSON Completo</h2>
+                        <pre>${JSON.stringify(data.gemini, null, 2)}</pre>
+                    `;
+                } else {
+                    statusDiv.innerHTML = `<div class="status error">❌ Error: ${data.error}</div>`;
+                }
+                
+            } catch (error) {
+                statusDiv.innerHTML = `<div class="status error">❌ Error: ${error.message}</div>`;
+            } finally {
+                uploadBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>

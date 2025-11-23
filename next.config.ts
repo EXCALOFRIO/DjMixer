@@ -58,25 +58,23 @@ const nextConfig: NextConfig = {
     return config;
   },
   // Configuración para Turbopack (usado en desarrollo con --turbopack)
-  experimental: {
-    turbo: {
-      rules: {
-        '*.wasm': {
-          loaders: ['file-loader'],
-          as: '*.wasm',
-        },
+  turbopack: {
+    rules: {
+      '*.wasm': {
+        loaders: ['file-loader'],
+        as: '*.wasm',
       },
-      resolveExtensions: [
-        '.mdx',
-        '.tsx',
-        '.ts',
-        '.jsx',
-        '.js',
-        '.mjs',
-        '.json',
-        '.wasm',
-      ],
     },
+    resolveExtensions: [
+      '.mdx',
+      '.tsx',
+      '.ts',
+      '.jsx',
+      '.js',
+      '.mjs',
+      '.json',
+      '.wasm',
+    ],
   },
   // ====================================================================
   // FIN DE LA CONFIGURACIÓN WEBASSEMBLY

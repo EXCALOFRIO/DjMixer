@@ -29,6 +29,7 @@ export function ImportadorMasivo() {
   const [progreso, setProgreso] = useState({ actual: 0, total: 0 });
   const [resultados, setResultados] = useState<ResultadoAnalisis[]>([]);
   const [resumen, setResumen] = useState<any>(null);
+  const [geminiEnProceso, setGeminiEnProceso] = useState(false);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -66,6 +67,11 @@ export function ImportadorMasivo() {
       setResumen(data.resumen);
       setResultados(data.resultados || []);
       setProgreso({ actual: data.resumen.total, total: data.resumen.total });
+      setGeminiEnProceso(data.geminiEnProceso || false);
+
+      if (data.geminiEnProceso) {
+        console.log(`✅ Fase 1 completada. ${data.resumen.geminiPendiente} análisis de Gemini en segundo plano.`);
+      }
 
     } catch (error) {
       console.error('Error en análisis masivo:', error);
@@ -84,7 +90,7 @@ export function ImportadorMasivo() {
         <CardHeader>
           <CardTitle>Importación Masiva de Canciones</CardTitle>
           <CardDescription>
-            Analiza hasta 100 canciones simultáneamente (procesamiento de 10 en 10)
+            Sistema de 2 fases: análisis instantáneo con Essentia (local) + análisis Gemini en segundo plano (rate limited: 50 req/min)
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -133,14 +139,25 @@ export function ImportadorMasivo() {
             <Alert>
               <CheckCircle className="h-4 w-4" />
               <AlertDescription>
-                <div className="font-semibold mb-2">Análisis completado</div>
+                <div className="font-semibold mb-2">
+                  {geminiEnProceso ? '⚡ Fase 1 completada - Canciones listas!' : 'Análisis completado'}
+                </div>
                 <div className="text-sm space-y-1">
                   <div>📦 Total: {resumen.total} archivos</div>
                   <div>💾 Desde caché: {resumen.cache}</div>
                   <div>🎵 Analizados: {resumen.analizados}</div>
-                  <div className="text-green-600">✅ Exitosos: {resumen.exitosos}</div>
+                  <div className="text-green-600">✅ Disponibles: {resumen.exitosos}</div>
                   {resumen.fallidos > 0 && (
                     <div className="text-red-600">❌ Fallidos: {resumen.fallidos}</div>
+                  )}
+                  {geminiEnProceso && (
+                    <div className="text-blue-600 font-medium mt-2">
+                      🤖 {resumen.geminiPendiente} análisis de Gemini en segundo plano
+                      <br />
+                      <span className="text-xs text-muted-foreground">
+                        (Rate limited: 50 peticiones/minuto con 5 API keys)
+                      </span>
+                    </div>
                   )}
                 </div>
               </AlertDescription>

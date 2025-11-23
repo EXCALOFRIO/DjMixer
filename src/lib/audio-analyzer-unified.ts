@@ -11,6 +11,39 @@ import { Note, Key } from 'tonal';
 // AudioContext se resuelve dinámicamente dentro de decodificarAudio para compatibilidad Node
 // Essentia.js se carga dinámicamente para compatibilidad con Next.js y Turbopack
 
+// ============================================
+// FUNCIONES DE CONVERSIÓN DE TIEMPO (SOLUCIÓN HÍBRIDA)
+// ============================================
+
+/**
+ * Convierte milisegundos a formato MM:SS para el Prompt (legibilidad humana)
+ * Ej: 65000 -> "01:05"
+ */
+function msToMinSec(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '00:00';
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Crea una cadena formateada para el Prompt que incluye ambos formatos.
+ * Esto ayuda a Gemini a no "perderse" con números grandes.
+ * Ej: 65432 -> "65432ms (01:05)"
+ */
+function formatTimeContext(ms: number): string {
+  return `${Math.round(ms)}ms (${msToMinSec(ms)})`;
+}
+
+/**
+ * Formatea un rango de tiempo para el Prompt
+ * Ej: [60000, 75000] -> "[60000-75000ms] (de 01:00 a 01:15)"
+ */
+function formatRangeContext(start: number, end: number): string {
+  return `[${Math.round(start)}-${Math.round(end)}ms] (de ${msToMinSec(start)} a ${msToMinSec(end)})`;
+}
+
 // ============================================================================
 // TIPOS
 // ============================================================================
@@ -32,48 +65,25 @@ export interface AnalisisCompleto {
   downbeats_ts_ms: number[];
   beats_ts_ms: number[];
   frases_ts_ms: number[];
+  transientes_ritmicos_ts_ms: number[];
   
   // ============================================================================
   // NUEVAS CARACTERÍSTICAS AVANZADAS DE ESSENTIA
   // ============================================================================
   
-  // Análisis de Ritmo Avanzado
+  // Análisis de Ritmo Avanzado (OPTIMIZADO - solo lo esencial para DJs)
   ritmo_avanzado: {
     onset_rate: number; // Tasa de ataques por segundo
     beats_loudness: number[]; // Intensidad de cada beat
     danceability: number; // Bailabilidad calculada por Essentia (0-3+)
-    dynamic_complexity: number; // Complejidad dinámica (0-1+)
-    bpm_histogram: { bpm: number; weight: number }[]; // Histograma de BPMs detectados
+    transients_ts_ms: number[]; // Onsets detectados en milisegundos
   };
   
-  // Análisis Tonal Avanzado
+  // Análisis Tonal Avanzado (OPTIMIZADO - sin acordes ni métricas académicas)
   tonal_avanzado: {
     key: string; // Tonalidad detectada (e.g., "C major")
     scale: string; // Escala (e.g., "major", "minor")
     key_strength: number; // Confianza de la tonalidad (0-1)
-    chords: { tiempo_ms: number; acorde: string; confianza: number }[]; // Progresión de acordes
-    tuning_frequency: number; // Afinación detectada (Hz, normalmente ~440)
-    harmonic_complexity: number; // Complejidad armónica
-    dissonance: number; // Nivel de disonancia
-  };
-  
-  // Análisis Espectral
-  espectral: {
-    spectral_centroid: number; // Centro espectral promedio (Hz) - brillantez
-    spectral_rolloff: number; // Rolloff espectral (Hz)
-    spectral_flux: number; // Flujo espectral - cambios en el espectro
-    spectral_complexity: number; // Complejidad espectral
-    spectral_contrast: number[]; // Contraste en bandas de frecuencia
-    zero_crossing_rate: number; // Tasa de cruces por cero - contenido de alta frecuencia
-  };
-  
-  // Análisis de Timbre
-  timbre: {
-    mfcc: number[][]; // Coeficientes cepstrales (características tímbricas)
-    brightness: number; // Brillo del sonido (0-1)
-    roughness: number; // Rugosidad/aspereza del sonido
-    warmth: number; // Calidez del sonido
-    sharpness: number; // Agudeza del sonido
   };
   
   // Análisis de Loudness
@@ -83,19 +93,10 @@ export interface AnalisisCompleto {
     short_term: number[]; // LUFS a corto plazo
     dynamic_range: number; // Rango dinámico en dB
     loudness_range: number; // LRA (Loudness Range)
+    replay_gain_db: number; // NUEVO: Ganancia sugerida para normalización (ReplayGain)
   };
   
-  // Género y Mood
-  clasificacion: {
-    mood_acoustic: number; // 0-1: Cuán acústico suena
-    mood_electronic: number; // 0-1: Cuán electrónico suena
-    mood_aggressive: number; // 0-1: Agresividad
-    mood_relaxed: number; // 0-1: Relajación
-    mood_happy: number; // 0-1: Felicidad
-    mood_sad: number; // 0-1: Tristeza
-    mood_party: number; // 0-1: Ambiente de fiesta
-    voice_instrumental_confidence: number; // Confianza vocal vs instrumental
-  };
+  // Nota: Clasificación de género y mood eliminada - se obtiene mejor con Gemini AI
   
   // Estructura de la Canción
   estructura: {
@@ -105,6 +106,9 @@ export interface AnalisisCompleto {
     fade_in_duration_ms: number;
     fade_out_duration_ms: number;
   };
+  
+  // Datos complementarios para análisis posterior
+  segmentos_voz: Array<{ start_ms: number; end_ms: number }>; // Segmentos VAD
 }
 
 // Opciones de análisis para permitir ejecución en batch y Node puro
@@ -118,6 +122,8 @@ export interface AnalisisConfig {
     djCues?: boolean;
     bpm?: boolean; // si true, se usa heurística simple en vez de Essentia
   };
+  // Habilita configuraciones internas extra rápidas (omite análisis secundarios)
+  fast?: boolean;
 }
 
 export interface CuePoint {
@@ -535,6 +541,79 @@ async function decodificarAudio(buffer: Buffer): Promise<AudioBuffer> {
   }
 }
 
+/**
+ * Remuestrea un AudioBuffer a una tasa de muestreo objetivo
+ * CRÍTICO para Essentia.js que requiere 44.1kHz
+ */
+async function remuestrearAudioBuffer(
+  audioBuffer: AudioBuffer,
+  targetSampleRate: number
+): Promise<AudioBuffer> {
+  const duracion = audioBuffer.duration;
+  const numCanales = audioBuffer.numberOfChannels;
+
+  // Obtener OfflineAudioContext
+  let OfflineAC: any = (globalThis as any).OfflineAudioContext;
+  if (!OfflineAC) {
+    const mod: any = await import('node-web-audio-api');
+    OfflineAC = mod.OfflineAudioContext || mod?.default?.OfflineAudioContext;
+    if (OfflineAC && !(globalThis as any).OfflineAudioContext) {
+      (globalThis as any).OfflineAudioContext = OfflineAC;
+    }
+  }
+  
+  if (!OfflineAC) {
+    throw new Error('OfflineAudioContext no disponible para remuestreo');
+  }
+  
+  const numFrames = Math.ceil(duracion * targetSampleRate);
+  const offlineCtx = new OfflineAC(numCanales, numFrames, targetSampleRate);
+  
+  const source = offlineCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  
+  source.connect(offlineCtx.destination);
+  source.start(0);
+  
+  console.log(`⚡ Remuestreando audio de ${audioBuffer.sampleRate}Hz a ${targetSampleRate}Hz...`);
+  const resampledBuffer = await offlineCtx.startRendering();
+  console.log('✅ Remuestreo completado.');
+  
+  return resampledBuffer;
+}
+
+/**
+ * Calcula el perfil de energía RMS del audio
+ * @param audioData - Datos de audio (Float32Array)
+ * @param sampleRate - Tasa de muestreo del audio
+ * @param ventanaMs - Tamaño de ventana en milisegundos (por defecto 250ms)
+ * @returns Array de valores RMS normalizados (0-1)
+ */
+export function calcularPerfilRMS(
+  audioData: Float32Array,
+  sampleRate: number,
+  ventanaMs: number = 250
+): number[] {
+  const muestrasPorVentana = Math.floor((ventanaMs / 1000) * sampleRate);
+  const perfilRMS: number[] = [];
+  
+  for (let i = 0; i < audioData.length; i += muestrasPorVentana) {
+    const ventana = audioData.slice(i, Math.min(i + muestrasPorVentana, audioData.length));
+    
+    // Calcular RMS de la ventana
+    let sumCuadrados = 0;
+    for (let j = 0; j < ventana.length; j++) {
+      sumCuadrados += ventana[j] * ventana[j];
+    }
+    const rms = Math.sqrt(sumCuadrados / ventana.length);
+    perfilRMS.push(rms);
+  }
+  
+  // Normalizar el perfil RMS al rango 0-1
+  const maxRMS = Math.max(...perfilRMS, 1e-6);
+  return perfilRMS.map(v => v / maxRMS);
+}
+
 // Normalización básica aproximada a -14 LUFS (usando RMS como aproximación)
 function normalizarAudioBufferInPlace(audioBuffer: AudioBuffer, targetLUFS = -14) {
   try {
@@ -612,15 +691,29 @@ async function analizarRitmoConEssentia(
 
   try {
     const beatsLoudness = essentia.BeatsLoudness(signal.vector, undefined, undefined, ticksVector, undefined, signal.sampleRate);
+    loudnessPerBeat = Array.from(essentia.vectorToArray(beatsLoudness.loudness) as Float32Array);
+    
     const beatogram = essentia.Beatogram(beatsLoudness.loudness, beatsLoudness.loudnessBandRatio);
     const meter = essentia.Meter(beatogram.beatogram);
-    const parsedMeter = parseMeterSignature(meter?.meter);
-    numerador = parsedMeter.numerador;
-    denominador = parsedMeter.denominador;
-    meterLabel = parsedMeter.meter;
-  loudnessPerBeat = Array.from(essentia.vectorToArray(beatsLoudness.loudness) as Float32Array);
+    
+    // Si Essentia devuelve un resultado válido, lo usamos
+    if (meter && meter.meter) {
+      const parsedMeter = parseMeterSignature(meter.meter);
+      numerador = parsedMeter.numerador;
+      denominador = parsedMeter.denominador;
+      meterLabel = parsedMeter.meter;
+    } else {
+      throw new Error('Essentia Meter no devolvió resultado.');
+    }
   } catch (meterError) {
-    console.warn('Essentia no pudo estimar el compás, usando 4/4 por defecto', meterError);
+    // PLAN B: Usar heurística de análisis de energía de beats
+    if (beatsMs.length > 8) {
+      const beatEnergies = computeBeatEnergiesFromAudio(signal.array, signal.sampleRate, beatsMs);
+      const inferred = inferMeterAndOffset(beatEnergies);
+      numerador = inferred.numerador;
+      denominador = inferred.denominador;
+      meterLabel = inferred.meter;
+    }
   }
 
   // Mejorar downbeats: si hay loudness por beat, estimar offset del downbeat
@@ -647,6 +740,40 @@ async function analizarRitmoConEssentia(
 }
 
 // ============================================================================
+// 2a. FUNCIÓN DE AYUDA PARA ESPECTRO (CORRIGE ERROR .size)
+// ============================================================================
+
+/**
+ * Calcula el espectro de magnitud de una señal de audio.
+ * Centraliza el windowing y la FFT para evitar errores repetidos.
+ * CORRECCIÓN CRÍTICA: Usa un tamaño de frame estándar (2048) para el análisis espectral
+ */
+function calcularEspectro(essentia: any, signal: EssentiaSignal): any | null {
+  try {
+    // CORRECCIÓN: Usar un tamaño de frame estándar para FFT (2048 es óptimo para música)
+    const frameSize = 2048;
+    
+    // Extraer solo un frame del audio completo (análisis de una ventana representativa)
+    const startSample = Math.floor(signal.array.length / 2); // Mitad de la canción
+    const endSample = Math.min(startSample + frameSize, signal.array.length);
+    const frame = signal.array.slice(startSample, endSample);
+    
+    // Si el frame es más corto que frameSize, rellenar con ceros
+    const paddedFrame = new Float32Array(frameSize);
+    paddedFrame.set(frame);
+    
+    const frameVector = essentia.arrayToVector(paddedFrame);
+    const windowed = essentia.Windowing(frameVector, true, frameSize, 'hann');
+    const spectrumResult = essentia.Spectrum(windowed.frame, frameSize);
+    
+    return spectrumResult.spectrum;
+  } catch (error) {
+    // Espectro no disponible - se usarán valores por defecto
+    return null;
+  }
+}
+
+// ============================================================================
 // 2b. ANÁLISIS AVANZADO DE RITMO CON ESSENTIA
 // ============================================================================
 
@@ -656,44 +783,78 @@ async function analizarRitmoAvanzado(
 ): Promise<AnalisisCompleto['ritmo_avanzado']> {
   try {
     // Onset Rate - Tasa de ataques
-    const onsets = essentia.OnsetRate(signal.vector);
-    const onsetRate = onsets?.onsetRate ?? 0;
+    let transientsMs: number[] = [];
+    let onsetRate = 0;
+    
+    try {
+      const onsets = essentia.OnsetRate(signal.vector);
+      onsetRate = onsets?.onsetRate ?? 0;
+      const onsetTimesVector = onsets?.onsetTimes;
+      if (onsetTimesVector) {
+        const onsetArray = essentia.vectorToArray(onsetTimesVector) as Float32Array;
+        transientsMs = Array.from(onsetArray).map((t: number) => Math.round(t * 1000));
+      }
+    } catch (onsetError) {
+      console.warn('   ⚠️ OnsetRate falló, usando OnsetDetection alternativo:', onsetError);
+    }
+    
+    // PLAN B: Si OnsetRate no devuelve onsets, usar análisis directo de energía
+    if (transientsMs.length === 0) {
+      try {
+        const audioArray = essentia.vectorToArray(signal.vector) as Float32Array;
+        const sampleRate = signal.sampleRate || 44100;
+        const ventanaMs = 10; // Ventanas de 10ms para detectar ataques rápidos
+        const muestrasPorVentana = Math.floor((ventanaMs / 1000) * sampleRate);
+        const hopSize = Math.floor(muestrasPorVentana / 2); // 50% overlap
+        
+        // Calcular energía por ventana
+        const energias: number[] = [];
+        for (let i = 0; i < audioArray.length - muestrasPorVentana; i += hopSize) {
+          let energia = 0;
+          for (let j = 0; j < muestrasPorVentana; j++) {
+            const sample = audioArray[i + j];
+            energia += sample * sample;
+          }
+          energias.push(Math.sqrt(energia / muestrasPorVentana));
+        }
+        
+        // Detectar picos de energía (transientes)
+        const energiaMedia = energias.reduce((a, b) => a + b, 0) / energias.length;
+        const umbral = energiaMedia * 3; // Picos 3x por encima de la media
+        
+        for (let i = 2; i < energias.length - 2; i++) {
+          // Detectar pico: más alto que vecinos y supera umbral
+          if (energias[i] > umbral &&
+              energias[i] > energias[i - 1] &&
+              energias[i] > energias[i - 2] &&
+              energias[i] > energias[i + 1] &&
+              energias[i] > energias[i + 2]) {
+            const tiempoMs = Math.round((i * hopSize / sampleRate) * 1000);
+            // Evitar duplicados muy cercanos (< 50ms)
+            if (transientsMs.length === 0 || tiempoMs - transientsMs[transientsMs.length - 1] > 50) {
+              transientsMs.push(tiempoMs);
+            }
+          }
+        }
+        
+        console.log(`   🥁 Transientes detectados por análisis de energía: ${transientsMs.length} hits`);
+      } catch (altError) {
+        console.warn('   ⚠️ Método alternativo de onsets también falló:', altError);
+      }
+    }
     
     // Danceability - Bailabilidad calculada por Essentia
     const danceability = essentia.Danceability(signal.vector);
     const danceabilityValue = danceability?.danceability ?? 0;
     
     // Dynamic Complexity - Complejidad dinámica
-    const dynamicComplexity = essentia.DynamicComplexity(signal.vector);
-    const dynamicComplexityValue = dynamicComplexity?.dynamicComplexity ?? 0;
-    
-    // BPM Histogram - Histograma de BPMs
-    const bpmHistogram = essentia.BpmHistogram(signal.vector);
-    const bpmHistogramVector = bpmHistogram?.bpmIntervals;
-    let bpmHistogramData: { bpm: number; weight: number }[] = [];
-    
-    if (bpmHistogramVector) {
-      const bpmArray = essentia.vectorToArray(bpmHistogramVector) as Float32Array;
-      // Crear histograma desde 60 BPM hasta 180 BPM
-      for (let i = 0; i < Math.min(bpmArray.length, 121); i++) {
-        const bpm = 60 + i;
-        const weight = bpmArray[i];
-        if (weight > 0.01) {
-          bpmHistogramData.push({ bpm, weight });
-        }
-      }
-      // Ordenar por peso descendente
-      bpmHistogramData.sort((a, b) => b.weight - a.weight);
-      // Mantener solo los top 10
-      bpmHistogramData = bpmHistogramData.slice(0, 10);
-    }
+    // NOTA: Dynamic Complexity y BPM Histogram eliminados (no útiles para DJs)
     
     return {
       onset_rate: onsetRate,
       beats_loudness: [], // Se llenará desde el análisis principal
       danceability: danceabilityValue,
-      dynamic_complexity: dynamicComplexityValue,
-      bpm_histogram: bpmHistogramData,
+      transients_ts_ms: transientsMs,
     };
   } catch (error) {
     console.warn('Error en análisis de ritmo avanzado:', error);
@@ -701,8 +862,7 @@ async function analizarRitmoAvanzado(
       onset_rate: 0,
       beats_loudness: [],
       danceability: 0,
-      dynamic_complexity: 0,
-      bpm_histogram: [],
+      transients_ts_ms: [],
     };
   }
 }
@@ -780,78 +940,8 @@ async function analizarTonalAvanzado(
     const baseSamples = bestSegment?.samples ?? prepararSegmentoParaTonalidad(signal.array, signal.sampleRate);
     const baseVector = essentia.arrayToVector(baseSamples);
 
-    const chords: { tiempo_ms: number; acorde: string; confianza: number }[] = [];
-    try {
-      const chordsDetection = essentia.ChordsDetection(baseVector, signal.sampleRate);
-      const chordsVector = chordsDetection?.chords;
-      const strengthVector = chordsDetection?.strength;
-      if (chordsVector && strengthVector) {
-        const chordsArray = essentia.vectorToArray(chordsVector);
-        const strengthArray = essentia.vectorToArray(strengthVector) as Float32Array;
-        const segmentDurationMs = baseSamples.length / signal.sampleRate * 1000;
-        const frameInterval = strengthArray.length > 0
-          ? segmentDurationMs / strengthArray.length
-          : 500;
-        for (let i = 0; i < Math.min(chordsArray.length, strengthArray.length, 120); i++) {
-          chords.push({
-            tiempo_ms: Math.round(i * frameInterval),
-            acorde: String(chordsArray[i] || 'N'),
-            confianza: strengthArray[i] || 0,
-          });
-        }
-      }
-    } catch (e) {
-      console.warn('No se pudieron detectar acordes mejorados:', e);
-    }
-
-    if (chords.length === 0) {
-      try {
-        const chordsDetection = essentia.ChordsDetection(signal.vector, signal.sampleRate);
-        const chordsVector = chordsDetection?.chords;
-        const strengthVector = chordsDetection?.strength;
-        if (chordsVector && strengthVector) {
-          const chordsArray = essentia.vectorToArray(chordsVector);
-          const strengthArray = essentia.vectorToArray(strengthVector) as Float32Array;
-          const frameInterval = 500;
-          for (let i = 0; i < Math.min(chordsArray.length, strengthArray.length, 100); i++) {
-            chords.push({
-              tiempo_ms: i * frameInterval,
-              acorde: String(chordsArray[i] || 'N'),
-              confianza: strengthArray[i] || 0,
-            });
-          }
-        }
-      } catch (fallbackChordsError) {
-        console.warn('No se pudieron detectar acordes:', fallbackChordsError);
-      }
-    }
-
-    let tuningFrequency = 440;
-    try {
-      const tuning = essentia.TuningFrequency(baseVector);
-      const detected = tuning?.tuningFrequency ?? tuning?.frequency;
-      if (typeof detected === 'number' && Number.isFinite(detected)) {
-        tuningFrequency = detected;
-      }
-    } catch (e) {
-      console.warn('No se pudo detectar tuning frequency:', e);
-    }
-
-    let harmonicComplexity = 0;
-    try {
-      const hc = essentia.HarmonicComplexity(baseVector);
-      harmonicComplexity = hc?.harmonicComplexity ?? 0;
-    } catch (e) {
-      console.warn('No se pudo calcular harmonic complexity:', e);
-    }
-
-    let dissonance = 0;
-    try {
-      const diss = essentia.Dissonance(baseVector);
-      dissonance = diss?.dissonance ?? 0;
-    } catch (e) {
-      console.warn('No se pudo calcular dissonance:', e);
-    }
+    // NOTA: Detección de acordes, tuning frequency, harmonic complexity y dissonance
+    // eliminados - son análisis académicos que no aportan valor práctico a un DJ
 
     const keyString = canonicalKeyString(finalTonic, finalScale);
 
@@ -859,10 +949,6 @@ async function analizarTonalAvanzado(
       key: keyString,
       scale: finalScale,
       key_strength: keyStrength,
-      chords,
-      tuning_frequency: tuningFrequency,
-      harmonic_complexity: harmonicComplexity,
-      dissonance,
     };
   } catch (error) {
     console.warn('Error en análisis tonal avanzado:', error);
@@ -870,166 +956,21 @@ async function analizarTonalAvanzado(
       key: 'C major',
       scale: 'major',
       key_strength: 0,
-      chords: [],
-      tuning_frequency: 440,
-      harmonic_complexity: 0,
-      dissonance: 0,
     };
   }
 }
 
 // ============================================================================
-// 2d. ANÁLISIS ESPECTRAL CON ESSENTIA
+// FUNCIONES DE ANÁLISIS ESPECTRAL, TIMBRE Y CLASIFICACIÓN ELIMINADAS
 // ============================================================================
-
-async function analizarEspectral(
-  essentia: any,
-  signal: EssentiaSignal
-): Promise<AnalisisCompleto['espectral']> {
-  try {
-    // Spectral Centroid
-    const centroid = essentia.SpectralCentroidTime(signal.vector, signal.sampleRate);
-    const spectralCentroid = centroid?.centroid ?? 0;
-    
-    // Spectral Rolloff
-    const rolloff = essentia.RollOff(signal.vector, undefined, signal.sampleRate);
-    const spectralRolloff = rolloff?.rollOff ?? 0;
-    
-    // Spectral Flux
-    const flux = essentia.Flux(signal.vector);
-    const spectralFlux = flux?.flux ?? 0;
-    
-    // Spectral Complexity
-    const complexity = essentia.SpectralComplexity(signal.vector, signal.sampleRate);
-    const spectralComplexity = complexity?.spectralComplexity ?? 0;
-    
-    // Spectral Contrast
-    let spectralContrast: number[] = [];
-    try {
-      const contrast = essentia.SpectralContrast(signal.vector, undefined, undefined, undefined, 
-        undefined, undefined, signal.sampleRate, undefined, undefined);
-      const contrastVector = contrast?.spectralContrast;
-      if (contrastVector) {
-        spectralContrast = Array.from(essentia.vectorToArray(contrastVector) as Float32Array);
-      }
-    } catch (e) {
-      console.warn('No se pudo calcular spectral contrast:', e);
-    }
-    
-    // Zero Crossing Rate
-    const zcr = essentia.ZeroCrossingRate(signal.vector);
-    const zeroCrossingRate = zcr?.zeroCrossingRate ?? 0;
-    
-    return {
-      spectral_centroid: spectralCentroid,
-      spectral_rolloff: spectralRolloff,
-      spectral_flux: spectralFlux,
-      spectral_complexity: spectralComplexity,
-      spectral_contrast: spectralContrast,
-      zero_crossing_rate: zeroCrossingRate,
-    };
-  } catch (error) {
-    console.warn('Error en análisis espectral:', error);
-    return {
-      spectral_centroid: 0,
-      spectral_rolloff: 0,
-      spectral_flux: 0,
-      spectral_complexity: 0,
-      spectral_contrast: [],
-      zero_crossing_rate: 0,
-    };
-  }
-}
-
+// Estos análisis eran computacionalmente costosos y de baja utilidad para DJs:
+// - analizarEspectral: Centroid, Rolloff, Flux, Complexity, Contrast, ZCR
+// - analizarTimbre: MFCC, Brightness, Roughness, Warmth, Sharpness  
+// - analizarClasificacion: Mood detection (acoustic, electronic, aggressive, etc.)
+//
+// Gemini AI proporciona clasificación de género y mood mucho más precisa y rica.
+// Los DJs evalúan el "brillo" y "textura" auditivamente usando EQs y filtros.
 // ============================================================================
-// 2e. ANÁLISIS DE TIMBRE CON ESSENTIA
-// ============================================================================
-
-async function analizarTimbre(
-  essentia: any,
-  signal: EssentiaSignal
-): Promise<AnalisisCompleto['timbre']> {
-  try {
-    // MFCC - Mel-Frequency Cepstral Coefficients
-    let mfcc: number[][] = [];
-    try {
-      const mfccResult = essentia.MFCC(signal.vector, undefined, undefined, undefined, undefined, 
-        undefined, undefined, undefined, undefined, undefined, undefined, signal.sampleRate, undefined, 
-        undefined, undefined, undefined);
-      const mfccBands = mfccResult?.mfcc;
-      if (mfccBands) {
-        const mfccArray = essentia.vectorToArray(mfccBands) as Float32Array;
-        // Agrupar en frames (13 coeficientes por frame)
-        const coeffsPerFrame = 13;
-        for (let i = 0; i < mfccArray.length; i += coeffsPerFrame) {
-          const frame = Array.from(mfccArray.slice(i, i + coeffsPerFrame));
-          if (frame.length === coeffsPerFrame) {
-            mfcc.push(frame);
-          }
-        }
-        // Limitar a 100 frames para no sobrecargar
-        mfcc = mfcc.slice(0, 100);
-      }
-    } catch (e) {
-      console.warn('No se pudieron calcular MFCCs:', e);
-    }
-    
-    // Brightness
-    let brightness = 0;
-    try {
-      const bright = essentia.Brightness(signal.vector, signal.sampleRate);
-      brightness = bright?.brightness ?? 0;
-    } catch (e) {
-      console.warn('No se pudo calcular brightness:', e);
-    }
-    
-    // Roughness (aproximación usando dissonance)
-    let roughness = 0;
-    try {
-      const rough = essentia.Dissonance(signal.vector);
-      roughness = rough?.dissonance ?? 0;
-    } catch (e) {
-      console.warn('No se pudo calcular roughness:', e);
-    }
-    
-    // Warmth (aproximación usando centroid - invertido)
-    let warmth = 0;
-    try {
-      const centroid = essentia.SpectralCentroidTime(signal.vector, signal.sampleRate);
-      const centroidValue = centroid?.centroid ?? 1000;
-      // Warmth es mayor cuando el centroid es bajo (más graves)
-      warmth = Math.max(0, 1 - (centroidValue / 4000));
-    } catch (e) {
-      console.warn('No se pudo calcular warmth:', e);
-    }
-    
-    // Sharpness
-    let sharpness = 0;
-    try {
-      const sharp = essentia.Sharpness(signal.vector);
-      sharpness = sharp?.sharpness ?? 0;
-    } catch (e) {
-      console.warn('No se pudo calcular sharpness:', e);
-    }
-    
-    return {
-      mfcc,
-      brightness,
-      roughness,
-      warmth,
-      sharpness,
-    };
-  } catch (error) {
-    console.warn('Error en análisis de timbre:', error);
-    return {
-      mfcc: [],
-      brightness: 0,
-      roughness: 0,
-      warmth: 0,
-      sharpness: 0,
-    };
-  }
-}
 
 // ============================================================================
 // 2f. ANÁLISIS DE LOUDNESS CON ESSENTIA
@@ -1039,40 +980,61 @@ async function analizarLoudness(
   essentia: any,
   signal: EssentiaSignal
 ): Promise<AnalisisCompleto['loudness']> {
+  // Calcular aproximación usando RMS como fallback
+  let integrated = -14;
+  let loudnessRange = 0;
+  const momentary: number[] = [];
+  const shortTerm: number[] = [];
+  let dynamicRange = 0;
+  
   try {
-    // LUFS - Loudness Units Full Scale (EBU R128)
-    const loudnessEBU = essentia.LoudnessEBUR128(signal.vector, undefined, undefined, signal.sampleRate);
-    const integrated = loudnessEBU?.integratedLoudness ?? -23;
-    const loudnessRange = loudnessEBU?.loudnessRange ?? 0;
-    
-    // Momentary y Short-term loudness (aproximación)
-    const momentary: number[] = [];
-    const shortTerm: number[] = [];
-    
-    try {
-      const momentaryVector = loudnessEBU?.momentaryLoudness;
-      const shortTermVector = loudnessEBU?.shortTermLoudness;
-      
-      if (momentaryVector) {
-        const momentaryArray = essentia.vectorToArray(momentaryVector) as Float32Array;
-        momentary.push(...Array.from(momentaryArray).slice(0, 100));
+    // Intentar usar LoudnessEBUR128 si está disponible
+    if (typeof essentia.LoudnessEBUR128 === 'function') {
+      // LoudnessEBUR128 puede fallar con ciertos formatos de audio
+      // Envolver en try-catch interno para usar fallback
+      try {
+        const loudnessEBU = essentia.LoudnessEBUR128(signal.vector, signal.vector, undefined, undefined, signal.sampleRate);
+        
+        if (loudnessEBU && typeof loudnessEBU === 'object') {
+          integrated = loudnessEBU.integratedLoudness ?? integrated;
+          loudnessRange = loudnessEBU.loudnessRange ?? loudnessRange;
+          
+          // Momentary y Short-term loudness
+          try {
+            const momentaryVector = loudnessEBU?.momentaryLoudness;
+            const shortTermVector = loudnessEBU?.shortTermLoudness;
+            
+            if (momentaryVector) {
+              const momentaryArray = essentia.vectorToArray(momentaryVector) as Float32Array;
+              momentary.push(...Array.from(momentaryArray).slice(0, 100));
+            }
+            
+            if (shortTermVector) {
+              const shortTermArray = essentia.vectorToArray(shortTermVector) as Float32Array;
+              shortTerm.push(...Array.from(shortTermArray).slice(0, 100));
+            }
+          } catch (e) {
+            // Momentary/short-term no disponibles
+          }
+        }
+      } catch (innerError) {
+        // LoudnessEBUR128 falló - usar aproximación RMS
+        const rms = Math.sqrt(signal.array.reduce((sum, val) => sum + val * val, 0) / signal.array.length);
+        integrated = 20 * Math.log10(Math.max(rms, 1e-10)) - 14; // Convertir RMS a LUFS aproximado
       }
-      
-      if (shortTermVector) {
-        const shortTermArray = essentia.vectorToArray(shortTermVector) as Float32Array;
-        shortTerm.push(...Array.from(shortTermArray).slice(0, 100));
-      }
-    } catch (e) {
-      console.warn('No se pudieron calcular loudness momentary/short-term:', e);
+    } else {
+      // LoudnessEBUR128 no disponible - usar aproximación RMS
+      const rms = Math.sqrt(signal.array.reduce((sum, val) => sum + val * val, 0) / signal.array.length);
+      integrated = 20 * Math.log10(Math.max(rms, 1e-10)) - 14;
     }
     
+    
     // Dynamic Range
-    let dynamicRange = 0;
     try {
       const dr = essentia.DynamicComplexity(signal.vector);
-      dynamicRange = (dr?.dynamicComplexity ?? 0) * 20; // Escalar a dB aproximado
+      dynamicRange = (dr?.dynamicComplexity ?? 0) * 20;
     } catch (e) {
-      console.warn('No se pudo calcular dynamic range:', e);
+      // DynamicComplexity no disponible
     }
     
     return {
@@ -1081,120 +1043,52 @@ async function analizarLoudness(
       short_term: shortTerm,
       dynamic_range: dynamicRange,
       loudness_range: loudnessRange,
+      replay_gain_db: 0, // Se calculará por separado
     };
   } catch (error) {
-    console.warn('Error en análisis de loudness:', error);
+    // Usar valores por defecto si todo falla
+    const rms = Math.sqrt(signal.array.reduce((sum, val) => sum + val * val, 0) / signal.array.length);
+    const approxLoudness = 20 * Math.log10(Math.max(rms, 1e-10)) - 14;
+    
     return {
-      integrated: -23,
+      integrated: approxLoudness,
       momentary: [],
       short_term: [],
       dynamic_range: 0,
       loudness_range: 0,
+      replay_gain_db: 0,
     };
   }
 }
 
 // ============================================================================
-// 2g. CLASIFICACIÓN DE MOOD Y GÉNERO CON ESSENTIA
+// 2g. ANÁLISIS DE REPLAYGAIN (NUEVA CARACTERÍSTICA)
 // ============================================================================
 
-async function analizarClasificacion(
+/**
+ * Calcula el ReplayGain de la pista para normalización de volumen.
+ * ReplayGain indica cuántos dB debes ajustar el volumen para que la pista
+ * suene a un nivel consistente con otras canciones.
+ * ¡Extremadamente útil para DJs!
+ */
+async function analizarReplayGain(
   essentia: any,
   signal: EssentiaSignal
-): Promise<AnalisisCompleto['clasificacion']> {
+): Promise<{ replay_gain_db: number }> {
   try {
-    // Acoustic vs Electronic (usando features espectrales)
-    let moodAcoustic = 0.5;
-    let moodElectronic = 0.5;
-    
-    try {
-      // Más centroid alto = más electrónico
-      const centroid = essentia.SpectralCentroidTime(signal.vector, signal.sampleRate);
-      const centroidValue = centroid?.centroid ?? 1000;
-      moodElectronic = Math.min(1, centroidValue / 3000);
-      moodAcoustic = 1 - moodElectronic;
-    } catch (e) {
-      console.warn('No se pudo calcular acoustic/electronic:', e);
+    if (typeof essentia.ReplayGain !== 'function') {
+      return { replay_gain_db: 0 };
     }
-    
-    // Aggressive (usando energy y dynamic complexity)
-    let moodAggressive = 0;
-    try {
-      const energy = essentia.Energy(signal.vector);
-      const dynamicComplexity = essentia.DynamicComplexity(signal.vector);
-      const energyValue = energy?.energy ?? 0;
-      const complexityValue = dynamicComplexity?.dynamicComplexity ?? 0;
-      moodAggressive = Math.min(1, (energyValue * complexityValue) / 100);
-    } catch (e) {
-      console.warn('No se pudo calcular aggressiveness:', e);
-    }
-    
-    // Relaxed (inverso de aggressive)
-    const moodRelaxed = Math.max(0, 1 - moodAggressive);
-    
-    // Happy vs Sad (usando key y mode)
-    let moodHappy = 0.5;
-    let moodSad = 0.5;
-    
-    try {
-      const keyDetection = essentia.KeyExtractor(signal.vector, undefined, undefined, undefined, undefined, 
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined, signal.sampleRate);
-      const scale = keyDetection?.scale ?? 'major';
-      
-      if (scale === 'major') {
-        moodHappy = 0.7;
-        moodSad = 0.3;
-      } else {
-        moodHappy = 0.3;
-        moodSad = 0.7;
-      }
-    } catch (e) {
-      console.warn('No se pudo calcular happy/sad:', e);
-    }
-    
-    // Party (usando danceability y energy)
-    let moodParty = 0;
-    try {
-      const danceability = essentia.Danceability(signal.vector);
-      const energy = essentia.Energy(signal.vector);
-      const danceValue = danceability?.danceability ?? 0;
-      const energyValue = energy?.energy ?? 0;
-      moodParty = Math.min(1, (danceValue * energyValue) / 50);
-    } catch (e) {
-      console.warn('No se pudo calcular party mood:', e);
-    }
-    
-    // Voice vs Instrumental
-    let voiceInstrumentalConfidence = 0.5; // 0 = instrumental, 1 = vocal
-    // Este valor se puede actualizar con el análisis de presencia vocal
-    
-    return {
-      mood_acoustic: moodAcoustic,
-      mood_electronic: moodElectronic,
-      mood_aggressive: moodAggressive,
-      mood_relaxed: moodRelaxed,
-      mood_happy: moodHappy,
-      mood_sad: moodSad,
-      mood_party: moodParty,
-      voice_instrumental_confidence: voiceInstrumentalConfidence,
-    };
-  } catch (error) {
-    console.warn('Error en análisis de clasificación:', error);
-    return {
-      mood_acoustic: 0.5,
-      mood_electronic: 0.5,
-      mood_aggressive: 0,
-      mood_relaxed: 1,
-      mood_happy: 0.5,
-      mood_sad: 0.5,
-      mood_party: 0,
-      voice_instrumental_confidence: 0.5,
-    };
+    const rg = essentia.ReplayGain(signal.vector, signal.sampleRate);
+    return { replay_gain_db: rg?.replayGain ?? 0 };
+  } catch (e) {
+    console.warn('   ⚠️ No se pudo calcular ReplayGain:', e);
+    return { replay_gain_db: 0 };
   }
 }
 
 // ============================================================================
-// 2h. ANÁLISIS DE ESTRUCTURA CON ESSENTIA
+// 2i. ANÁLISIS DE ESTRUCTURA CON ESSENTIA
 // ============================================================================
 
 async function analizarEstructura(
@@ -2145,8 +2039,331 @@ export async function analizarAudiosEnLote(
  * FUNCIÓN PRINCIPAL: Analiza audio completo
  * Combina todos los análisis en un solo resultado
  */
+/**
+ * Encuentra puntos de cambio brusco de energía (picos en la derivada del RMS)
+ * Estos puntos marcan transiciones musicales (intro→verso, verso→estribillo, etc.)
+ */
+function encontrarPuntosDeCorte(
+  energias: number[],
+  ventanaMs: number,
+  minDistanciaMs: number = 10000 // Mínimo 10s entre cortes para evitar fragmentación excesiva
+): number[] {
+  if (energias.length < 3) return [];
+  
+  // 1. Calcular diferencias entre ventanas consecutivas (derivada de energía)
+  const diferencias: number[] = [];
+  for (let i = 1; i < energias.length; i++) {
+    diferencias.push(Math.abs(energias[i] - energias[i - 1]));
+  }
+  
+  // 2. Suavizar con media móvil (ventana de 5 para eliminar ruido)
+  const diferenciasSuavizadas: number[] = [];
+  for (let i = 0; i < diferencias.length; i++) {
+    const inicio = Math.max(0, i - 2);
+    const fin = Math.min(diferencias.length, i + 3);
+    const ventana = diferencias.slice(inicio, fin);
+    const promedio = ventana.reduce((a, b) => a + b, 0) / ventana.length;
+    diferenciasSuavizadas.push(promedio);
+  }
+  
+  // 3. Calcular umbral adaptativo para detectar cambios significativos
+  const promedio = diferenciasSuavizadas.reduce((a, b) => a + b, 0) / diferenciasSuavizadas.length;
+  const varianza = diferenciasSuavizadas.reduce((sum, val) => sum + Math.pow(val - promedio, 2), 0) / diferenciasSuavizadas.length;
+  const desviacion = Math.sqrt(varianza);
+  const umbralPico = promedio + 1.5 * desviacion;
+  
+  // 4. Detectar picos: puntos que superan el umbral y son máximos locales
+  const puntosDeCorte: number[] = [0]; // Siempre empezar en 0
+  const minVentanasEntreCortes = Math.floor(minDistanciaMs / ventanaMs);
+  
+  for (let i = 1; i < diferenciasSuavizadas.length - 1; i++) {
+    const esPico = diferenciasSuavizadas[i] > umbralPico &&
+                   diferenciasSuavizadas[i] > diferenciasSuavizadas[i - 1] &&
+                   diferenciasSuavizadas[i] > diferenciasSuavizadas[i + 1];
+    
+    if (esPico) {
+      const tiempoMs = i * ventanaMs;
+      const ultimoCorte = puntosDeCorte[puntosDeCorte.length - 1];
+      
+      // Respetar distancia mínima entre cortes
+      if (tiempoMs - ultimoCorte >= minDistanciaMs) {
+        puntosDeCorte.push(tiempoMs);
+      }
+    }
+  }
+  
+  return puntosDeCorte;
+}
+
+/**
+ * Detecta segmentos de voz con configuración personalizada de umbrales
+ * Versión parametrizable para ejecutar múltiples pasadas con diferentes sensibilidades
+ */
+function detectarSegmentosVozConConfig(
+  audioData: Float32Array,
+  sampleRate: number,
+  config: {
+    ventanaMs?: number;
+    minSilencioDuracionMs?: number;
+    percentilEnergia?: number;
+    percentilZCR?: number;
+    multiplicadorEnergia?: number;
+    multiplicadorZCR?: number;
+    minDuracionSegmento?: number;
+  } = {}
+): Array<{ start_ms: number; end_ms: number }> {
+  const {
+    ventanaMs = 50,
+    minSilencioDuracionMs = 700,
+    percentilEnergia = 0.25,
+    percentilZCR = 0.40,
+    multiplicadorEnergia = 1.5,
+    multiplicadorZCR = 1.2,
+    minDuracionSegmento = 450
+  } = config;
+
+  const muestrasPorVentana = Math.floor((ventanaMs / 1000) * sampleRate);
+  const numVentanas = Math.floor(audioData.length / muestrasPorVentana);
+  const duracionTotalMs = (audioData.length / sampleRate) * 1000;
+  
+  // Calcular características por ventana
+  const caracteristicas: Array<{
+    energia: number;
+    zcr: number;
+    espectralCentroid: number;
+    tiempoMs: number;
+  }> = [];
+  
+  for (let i = 0; i < numVentanas; i++) {
+    const inicio = i * muestrasPorVentana;
+    const ventana = audioData.slice(inicio, Math.min(inicio + muestrasPorVentana, audioData.length));
+    
+    // Energía RMS
+    let sumaEnergia = 0;
+    for (let j = 0; j < ventana.length; j++) {
+      sumaEnergia += ventana[j] * ventana[j];
+    }
+    const energia = Math.sqrt(sumaEnergia / ventana.length);
+    
+    // Zero Crossing Rate
+    let crossings = 0;
+    for (let j = 1; j < ventana.length; j++) {
+      if ((ventana[j] >= 0 && ventana[j - 1] < 0) || (ventana[j] < 0 && ventana[j - 1] >= 0)) {
+        crossings++;
+      }
+    }
+    const zcr = crossings / ventana.length;
+    
+    // Spectral Centroid simplificado
+    let sumaMagnitudes = 0;
+    let sumaPonderada = 0;
+    for (let j = 0; j < ventana.length; j++) {
+      const magnitud = Math.abs(ventana[j]);
+      sumaMagnitudes += magnitud;
+      sumaPonderada += magnitud * j;
+    }
+    const espectralCentroid = sumaMagnitudes > 0 ? sumaPonderada / sumaMagnitudes : 0;
+    
+    caracteristicas.push({
+      energia,
+      zcr,
+      espectralCentroid,
+      tiempoMs: Math.floor((inicio / sampleRate) * 1000),
+    });
+  }
+  
+  // Segmentación dinámica por cambios de energía
+  const energiasSimplificadas = caracteristicas.map(c => c.energia);
+  const puntosDeCorteMs = encontrarPuntosDeCorte(energiasSimplificadas, ventanaMs, 10000);
+  
+  const bloquesDinamicos: Array<{ inicio_ms: number; fin_ms: number }> = [];
+  for (let i = 0; i < puntosDeCorteMs.length; i++) {
+    const inicioMs = puntosDeCorteMs[i];
+    const finMs = i < puntosDeCorteMs.length - 1 ? puntosDeCorteMs[i + 1] : duracionTotalMs;
+    bloquesDinamicos.push({ inicio_ms: inicioMs, fin_ms: finMs });
+  }
+  
+  const esVoz: boolean[] = new Array(caracteristicas.length).fill(false);
+  
+  // Análisis adaptativo por bloque con umbrales configurables
+  for (let idx = 0; idx < bloquesDinamicos.length; idx++) {
+    const bloque = bloquesDinamicos[idx];
+    const inicioVentana = Math.floor(bloque.inicio_ms / ventanaMs);
+    const finVentana = Math.min(Math.floor(bloque.fin_ms / ventanaMs), caracteristicas.length);
+    const caracteristicasBloque = caracteristicas.slice(inicioVentana, finVentana);
+    
+    if (caracteristicasBloque.length === 0) continue;
+    
+    const energiasBloque = caracteristicasBloque.map(c => c.energia).sort((a, b) => a - b);
+    const zcrsBloque = caracteristicasBloque.map(c => c.zcr).sort((a, b) => a - b);
+    
+    const umbralEnergiaLocal = energiasBloque[Math.floor(energiasBloque.length * percentilEnergia)];
+    const umbralZCRLocal = zcrsBloque[Math.floor(zcrsBloque.length * percentilZCR)];
+    
+    for (let i = 0; i < caracteristicasBloque.length; i++) {
+      const idxGlobal = inicioVentana + i;
+      const c = caracteristicasBloque[i];
+      
+      const tieneEnergia = c.energia > umbralEnergiaLocal * multiplicadorEnergia;
+      const tieneZCRAltro = c.zcr > umbralZCRLocal * multiplicadorZCR;
+      
+      esVoz[idxGlobal] = tieneEnergia && tieneZCRAltro;
+    }
+  }
+  
+  // Suavizar con filtro de mediana
+  const esVozSuavizado = [...esVoz];
+  for (let i = 2; i < esVoz.length - 2; i++) {
+    const ventanaLocal = esVoz.slice(i - 2, i + 3);
+    const conteoVerdaderos = ventanaLocal.filter(v => v).length;
+    esVozSuavizado[i] = conteoVerdaderos >= 3;
+  }
+  
+  // Detectar transiciones voz/silencio
+  const segmentos: Array<{ start_ms: number; end_ms: number }> = [];
+  let inicioSegmento: number | null = null;
+  let contadorSilencioVentanas = 0;
+  const ventanasSilencioMinimas = Math.ceil(minSilencioDuracionMs / ventanaMs);
+  
+  for (let i = 0; i < esVozSuavizado.length; i++) {
+    if (esVozSuavizado[i]) {
+      contadorSilencioVentanas = 0;
+      if (inicioSegmento === null) {
+        inicioSegmento = caracteristicas[i].tiempoMs;
+      }
+    } else {
+      if (inicioSegmento !== null) {
+        contadorSilencioVentanas++;
+        if (contadorSilencioVentanas >= ventanasSilencioMinimas) {
+          const finSegmento = caracteristicas[i - ventanasSilencioMinimas].tiempoMs;
+          if (finSegmento > inicioSegmento) {
+            segmentos.push({ start_ms: inicioSegmento, end_ms: finSegmento });
+          }
+          inicioSegmento = null;
+          contadorSilencioVentanas = 0;
+        }
+      }
+    }
+  }
+  
+  if (inicioSegmento !== null) {
+    const ultimaVentana = caracteristicas[caracteristicas.length - 1];
+    segmentos.push({ start_ms: inicioSegmento, end_ms: ultimaVentana.tiempoMs });
+  }
+  
+  // Filtrar segmentos muy cortos
+  return segmentos.filter(seg => (seg.end_ms - seg.start_ms) >= minDuracionSegmento);
+}
+
+/**
+ * Fusiona segmentos que se solapan o están muy cerca
+ */
+function fusionarSegmentosVoz(
+  segmentos: Array<{ start_ms: number; end_ms: number }>,
+  huecoMaximoMs: number = 500
+): Array<{ start_ms: number; end_ms: number }> {
+  if (segmentos.length === 0) return [];
+  
+  // Ordenar por tiempo de inicio
+  const ordenados = [...segmentos].sort((a, b) => a.start_ms - b.start_ms);
+  const fusionados: Array<{ start_ms: number; end_ms: number }> = [];
+  
+  let actual = { ...ordenados[0] };
+  
+  for (let i = 1; i < ordenados.length; i++) {
+    const siguiente = ordenados[i];
+    
+    // Si el siguiente segmento empieza antes de que termine el actual + hueco máximo
+    if (siguiente.start_ms <= actual.end_ms + huecoMaximoMs) {
+      // Fusionar extendiendo el fin del segmento actual
+      actual.end_ms = Math.max(actual.end_ms, siguiente.end_ms);
+    } else {
+      // Guardar el segmento actual y empezar uno nuevo
+      fusionados.push(actual);
+      actual = { ...siguiente };
+    }
+  }
+  
+  fusionados.push(actual);
+  return fusionados;
+}
+
+/**
+ * Detecta segmentos de voz usando análisis adaptativo con segmentación DINÁMICA
+ * Implementa enfoque HÍBRIDO: VAD principal + VAD súper sensible para intros/outros
+ */
+function detectarSegmentosVozBasico(
+  audioData: Float32Array,
+  sampleRate: number,
+  ventanaMs: number = 50,
+  minSilencioDuracionMs: number = 700
+): Array<{ start_ms: number; end_ms: number }> {
+  console.log('   🔬 VAD Híbrido: Ejecutando análisis en 2 pasadas...');
+  
+  // PASADA 1: VAD Adaptativo Principal (alta confianza)
+  console.log('   📊 Pasada 1/2: VAD Adaptativo (umbrales estándar)');
+  const segmentosPrincipales = detectarSegmentosVozConConfig(audioData, sampleRate, {
+    ventanaMs,
+    minSilencioDuracionMs,
+    percentilEnergia: 0.25,
+    percentilZCR: 0.40,
+    multiplicadorEnergia: 1.5,
+    multiplicadorZCR: 1.2,
+    minDuracionSegmento: 450
+  });
+  
+  console.log(`      ✅ ${segmentosPrincipales.length} segmentos detectados (alta confianza)`);
+  
+  // PASADA 2: VAD Súper Sensible (red de seguridad para voces suaves)
+  console.log('   🎯 Pasada 2/2: VAD Súper Sensible (captura intros/outros suaves)');
+  const segmentosSensibles = detectarSegmentosVozConConfig(audioData, sampleRate, {
+    ventanaMs,
+    minSilencioDuracionMs: 500, // Más permisivo con huecos
+    percentilEnergia: 0.10,     // MUCHO más bajo (percentil 10 en lugar de 25)
+    percentilZCR: 0.20,          // Más bajo (percentil 20 en lugar de 40)
+    multiplicadorEnergia: 1.2,   // Menos estricto
+    multiplicadorZCR: 1.1,       // Menos estricto
+    minDuracionSegmento: 300     // Segmentos más cortos permitidos
+  });
+  
+  console.log(`      ✅ ${segmentosSensibles.length} segmentos adicionales detectados (sensible)`);
+  
+  // FUSIÓN INTELIGENTE: Agregar segmentos sensibles que estén en "huecos" del VAD principal
+  const todosLosSegmentos = [...segmentosPrincipales];
+  let segmentosNuevos = 0;
+  
+  for (const segSensible of segmentosSensibles) {
+    // ¿Este segmento sensible está en un hueco (no solapa con ningún segmento principal)?
+    const estaEnHueco = !segmentosPrincipales.some(segPrincipal => 
+      segSensible.start_ms < segPrincipal.end_ms && segSensible.end_ms > segPrincipal.start_ms
+    );
+    
+    if (estaEnHueco) {
+      todosLosSegmentos.push(segSensible);
+      segmentosNuevos++;
+    }
+  }
+  
+  console.log(`      🔗 ${segmentosNuevos} segmentos nuevos agregados de VAD sensible`);
+  
+  // Ordenar y fusionar segmentos que estén muy cerca
+  todosLosSegmentos.sort((a, b) => a.start_ms - b.start_ms);
+  const segmentosFinales = fusionarSegmentosVoz(todosLosSegmentos, 500);
+  
+  if (segmentosFinales.length > 0) {
+    const primerSegmentoMs = segmentosFinales[0].start_ms;
+    console.log(`   🎙️ VAD Híbrido: ${segmentosFinales.length} segmentos finales (primer segmento: ${primerSegmentoMs}ms)`);
+  } else {
+    console.log(`   ⚠️ VAD Híbrido: 0 segmentos detectados - posible audio instrumental puro`);
+  }
+  
+  return segmentosFinales;
+}
+
+
 export async function analizarAudioCompleto(buffer: Buffer, config: AnalisisConfig = {}): Promise<AnalisisCompleto> {
   console.log('🎵 Iniciando análisis completo con Essentia.js...');
+  if (config.fast) console.log('⚡ MODO RÁPIDO ACTIVADO: Saltando análisis pesados');
 
   const audioPromise = decodificarAudio(buffer);
   const essentiaPromise = loadEssentiaInstance().catch(error => {
@@ -2154,7 +2371,16 @@ export async function analizarAudioCompleto(buffer: Buffer, config: AnalisisConf
     return null;
   });
 
-  const audioBuffer = await audioPromise;
+  let audioBuffer = await audioPromise;
+  
+  // CRÍTICO: Remuestrear a 44.1kHz si es necesario (Essentia.js requiere esta tasa)
+  if (audioBuffer.sampleRate !== 44100) {
+    console.log(`🔄 Audio original: ${audioBuffer.sampleRate}Hz - remuestreando a 44100Hz para Essentia.js...`);
+    audioBuffer = await remuestrearAudioBuffer(audioBuffer, 44100);
+  } else {
+    console.log(`✅ Audio ya está a 44100Hz - no requiere remuestreo`);
+  }
+  
   // Normalización opcional antes de extraer datos
   const normalizeOpt = config.normalize;
   if (normalizeOpt) {
@@ -2272,12 +2498,10 @@ export async function analizarAudioCompleto(buffer: Buffer, config: AnalisisConf
     console.log(`   ✓ Energía (fallback): ${(energiaHeuristica * 100).toFixed(0)}%, Bailabilidad ${(bailabilidadHeuristica * 100).toFixed(0)}%`);
   }
 
-  const presenciaVocal: any[] = []; // ELIMINADO: Análisis de presencia vocal con Meyda (siempre detectaba mixto incorrectamente)
-
   let camelot = '8A';
   let compatibles = CAMELOT_WHEEL['8A'];
   if (!config.disable?.tonalidad) {
-    console.log('�🎹 Detectando tonalidad...');
+    console.log('🎹 Detectando tonalidad...');
     const keyInfo = detectarTonalidad(audioData, sampleRate);
     camelot = keyInfo.camelot;
     compatibles = keyInfo.compatibles;
@@ -2306,73 +2530,76 @@ export async function analizarAudioCompleto(buffer: Buffer, config: AnalisisConf
   console.log('✅ Análisis completado\n');
 
   // ============================================================================
-  // ANÁLISIS AVANZADOS CON ESSENTIA
+  // ANÁLISIS AVANZADOS CON ESSENTIA (OPTIMIZADO)
   // ============================================================================
   
   let ritmoAvanzado: AnalisisCompleto['ritmo_avanzado'];
   let tonalAvanzado: AnalisisCompleto['tonal_avanzado'];
-  let espectral: AnalisisCompleto['espectral'];
-  let timbre: AnalisisCompleto['timbre'];
   let loudness: AnalisisCompleto['loudness'];
-  let clasificacion: AnalisisCompleto['clasificacion'];
   let estructura: AnalisisCompleto['estructura'];
   
   if (essentia && essentiaSignal) {
-    console.log('🔬 Ejecutando análisis avanzados de Essentia...');
+    console.log('🔬 Ejecutando análisis avanzados de Essentia (optimizado)...');
     
-    // Ejecutar todos los análisis en paralelo para mayor eficiencia
-    const [
-      ritmoAvanzadoResult,
-      tonalAvanzadoResult,
-      espectralResult,
-      timbreResult,
-      loudnessResult,
-      clasificacionResult,
-      estructuraResult
-    ] = await Promise.all([
-      analizarRitmoAvanzado(essentia, essentiaSignal),
-      analizarTonalAvanzado(essentia, essentiaSignal),
-      analizarEspectral(essentia, essentiaSignal),
-      analizarTimbre(essentia, essentiaSignal),
-      analizarLoudness(essentia, essentiaSignal),
-      analizarClasificacion(essentia, essentiaSignal),
-      analizarEstructura(essentia, essentiaSignal, duracionMs)
-    ]);
-    
-    ritmoAvanzado = ritmoAvanzadoResult;
-    ritmoAvanzado.beats_loudness = ritmo.loudnessPerBeat; // Añadir loudness de beats
-    tonalAvanzado = tonalAvanzadoResult;
-    if (tonalAvanzado.key_strength >= 0.35) {
-      const canonicalKey = canonicalKeyFromString(tonalAvanzado.key);
-      if (canonicalKey) {
-        const advancedCamelot = KEY_TO_CAMELOT[canonicalKey];
-        if (advancedCamelot) {
-          camelot = advancedCamelot;
-          compatibles = CAMELOT_WHEEL[camelot] || [camelot];
+    // Si es modo FAST, saltamos los análisis pesados
+    if (config.fast) {
+        console.log('   ⏩ MODO FAST: Saltando Ritmo Avanzado, Loudness y ReplayGain');
+        ritmoAvanzado = {
+            onset_rate: 0,
+            beats_loudness: ritmo.loudnessPerBeat,
+            danceability: metricas.bailabilidad,
+            transients_ts_ms: [],
+        };
+        tonalAvanzado = {
+            key: camelot,
+            scale: 'major',
+            key_strength: 0,
+        };
+        loudness = {
+            integrated: -14,
+            momentary: [],
+            short_term: [],
+            dynamic_range: 0,
+            loudness_range: 0,
+            replay_gain_db: 0,
+        };
+        // Estructura es rápida, la mantenemos
+        estructura = await analizarEstructura(essentia, essentiaSignal, duracionMs);
+    } else {
+        // Ejecutar solo los análisis relevantes para DJs en paralelo
+        const [
+          ritmoAvanzadoResult,
+          tonalAvanzadoResult,
+          loudnessResult,
+          replayGainResult,
+          estructuraResult
+        ] = await Promise.all([
+          analizarRitmoAvanzado(essentia, essentiaSignal),
+          analizarTonalAvanzado(essentia, essentiaSignal),
+          analizarLoudness(essentia, essentiaSignal),
+          analizarReplayGain(essentia, essentiaSignal),
+          analizarEstructura(essentia, essentiaSignal, duracionMs)
+        ]);
+        
+        ritmoAvanzado = ritmoAvanzadoResult;
+        ritmoAvanzado.beats_loudness = ritmo.loudnessPerBeat; // Añadir loudness de beats
+        tonalAvanzado = tonalAvanzadoResult;
+        if (tonalAvanzado.key_strength >= 0.35) {
+          const canonicalKey = canonicalKeyFromString(tonalAvanzado.key);
+          if (canonicalKey) {
+            const advancedCamelot = KEY_TO_CAMELOT[canonicalKey];
+            if (advancedCamelot) {
+              camelot = advancedCamelot;
+              compatibles = CAMELOT_WHEEL[camelot] || [camelot];
+            }
+          }
         }
-      }
-    }
-    espectral = espectralResult;
-    timbre = timbreResult;
-    loudness = loudnessResult;
-    clasificacion = clasificacionResult;
-    estructura = estructuraResult;
-    
-    // Actualizar voice_instrumental_confidence basado en presencia vocal
-    if (presenciaVocal.length > 0) {
-      const vocalFrames = presenciaVocal.filter(p => p.tipo === 'vocal').length;
-      clasificacion.voice_instrumental_confidence = vocalFrames / presenciaVocal.length;
+        loudness = loudnessResult;
+        loudness.replay_gain_db = replayGainResult.replay_gain_db; // Añadir ReplayGain
+        estructura = estructuraResult;
     }
     
     console.log('   ✓ Análisis avanzados completados');
-    console.log(`   - Onset Rate: ${ritmoAvanzado.onset_rate.toFixed(2)}`);
-    console.log(`   - Danceability: ${ritmoAvanzado.danceability.toFixed(2)}`);
-    console.log(`   - Tonalidad: ${tonalAvanzado.key} (confianza: ${(tonalAvanzado.key_strength * 100).toFixed(0)}%)`);
-    console.log(`   - Spectral Centroid: ${espectral.spectral_centroid.toFixed(0)} Hz`);
-    console.log(`   - Brightness: ${(timbre.brightness * 100).toFixed(0)}%`);
-    console.log(`   - Integrated Loudness: ${loudness.integrated.toFixed(1)} LUFS`);
-    console.log(`   - Mood: ${clasificacion.mood_happy > clasificacion.mood_sad ? 'Happy' : 'Sad'} / ${clasificacion.mood_acoustic > clasificacion.mood_electronic ? 'Acoustic' : 'Electronic'}`);
-    console.log(`   - Estructura: ${estructura.segmentos.length} segmentos detectados`);
   } else {
     // Valores por defecto si Essentia no está disponible
     console.log('⚠️ Essentia no disponible, usando valores por defecto para análisis avanzados');
@@ -2380,32 +2607,12 @@ export async function analizarAudioCompleto(buffer: Buffer, config: AnalisisConf
       onset_rate: 0,
       beats_loudness: ritmo.loudnessPerBeat,
       danceability: metricas.bailabilidad,
-      dynamic_complexity: 0,
-      bpm_histogram: [],
+      transients_ts_ms: [],
     };
     tonalAvanzado = {
       key: camelot,
       scale: 'major',
       key_strength: 0,
-      chords: [],
-      tuning_frequency: 440,
-      harmonic_complexity: 0,
-      dissonance: 0,
-    };
-    espectral = {
-      spectral_centroid: 0,
-      spectral_rolloff: 0,
-      spectral_flux: 0,
-      spectral_complexity: 0,
-      spectral_contrast: [],
-      zero_crossing_rate: 0,
-    };
-    timbre = {
-      mfcc: [],
-      brightness: 0,
-      roughness: 0,
-      warmth: 0,
-      sharpness: 0,
     };
     loudness = {
       integrated: -14,
@@ -2413,16 +2620,7 @@ export async function analizarAudioCompleto(buffer: Buffer, config: AnalisisConf
       short_term: [],
       dynamic_range: 0,
       loudness_range: 0,
-    };
-    clasificacion = {
-      mood_acoustic: 0.5,
-      mood_electronic: 0.5,
-      mood_aggressive: 0,
-      mood_relaxed: 1,
-      mood_happy: 0.5,
-      mood_sad: 0.5,
-      mood_party: metricas.bailabilidad,
-      voice_instrumental_confidence: 0.5,
+      replay_gain_db: 0,
     };
     estructura = {
       segmentos: [],
@@ -2432,6 +2630,11 @@ export async function analizarAudioCompleto(buffer: Buffer, config: AnalisisConf
       fade_out_duration_ms: 0,
     };
   }
+  
+  // Detectar segmentos de voz (VAD básico)
+  console.log('🎬 Detectando segmentos de voz (VAD)...');
+  const segmentosVoz = detectarSegmentosVozBasico(audioData, sampleRate);
+  console.log(`   ✓ ${segmentosVoz.length} segmentos de voz detectados`);
 
   return {
     bpm: bpmFinal,
@@ -2446,14 +2649,13 @@ export async function analizarAudioCompleto(buffer: Buffer, config: AnalisisConf
     downbeats_ts_ms: downbeatsFinal,
     beats_ts_ms: beatsFinal,
     frases_ts_ms: frasesFinal,
-    // Nuevas características avanzadas
+    transientes_ritmicos_ts_ms: ritmoAvanzado.transients_ts_ms,
+    // Características avanzadas OPTIMIZADAS para DJs
     ritmo_avanzado: ritmoAvanzado,
     tonal_avanzado: tonalAvanzado,
-    espectral,
-    timbre,
     loudness,
-    clasificacion,
     estructura,
+    // Datos para análisis adicional
+    segmentos_voz: segmentosVoz,
   };
 }
-

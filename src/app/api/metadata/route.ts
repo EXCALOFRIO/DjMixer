@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as musicMetadata from 'music-metadata';
 import { sql } from '@/lib/db';
+import { normalizeCancionRow } from '@/lib/db-normalize';
 
 // Calcular hash SHA-256
 async function calcularHashArchivo(buffer: ArrayBuffer): Promise<string> {
@@ -31,25 +32,17 @@ export async function POST(request: NextRequest) {
 
           // 2. Verificar si ya existe en BD
           const existente = await sql`
-            SELECT id, hash_archivo, titulo, artista, duracion_ms, bpm, 
-                   tonalidad_camelot, energia, bailabilidad, animo_general
+            SELECT *
             FROM canciones_analizadas 
             WHERE hash_archivo = ${hash}
           `;
 
           if (existente.length > 0) {
+            const cancion = normalizeCancionRow(existente[0] as Record<string, unknown>);
             return {
               hash,
-              titulo: existente[0].titulo,
-              artista: existente[0].artista,
-              duracion_ms: existente[0].duracion_ms,
-              bpm: existente[0].bpm,
-              tonalidad_camelot: existente[0].tonalidad_camelot,
-              energia: existente[0].energia,
-              bailabilidad: existente[0].bailabilidad,
-              animo_general: existente[0].animo_general,
               analizado: true,
-              id: existente[0].id
+              ...cancion,
             };
           }
 

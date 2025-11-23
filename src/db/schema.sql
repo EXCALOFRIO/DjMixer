@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS canciones_analizadas (
     analisis_contenido JSONB NOT NULL DEFAULT '{"tema": {"resumen": "", "palabras_clave": [], "emocion": "neutral"}, "eventos_dj": []}',
     
     -- ===================================================================
+    -- DATOS TÉCNICOS (VAD + RMS)
+    -- ===================================================================
+    segmentos_voz JSONB NOT NULL DEFAULT '[]',
+    huecos_analizados JSONB NOT NULL DEFAULT '[]',
+    
+    -- ===================================================================
     -- METADATOS
     -- ===================================================================
     fecha_procesado TIMESTAMPTZ DEFAULT NOW(),

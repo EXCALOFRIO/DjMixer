@@ -8,6 +8,7 @@ import { Button } from "../ui/button";
 import { Play, Pause, SkipBack, SkipForward, ChevronsRight, ChevronsLeft, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Track } from "@/app/page";
+import type { MixPlanEntry } from "@/lib/mix-planner";
 import { TrackAnalysis } from "./track-analysis";
 
 
@@ -241,6 +242,8 @@ const ProgressRing = ({
 type PlaybackInterfaceProps = {
   tracks: Track[];
   volume: number;
+  mixPlan?: MixPlanEntry[];
+  mixSequence?: any;
 };
 
 const SeekIndicator = ({ time, direction }: { time: number; direction: 'forward' | 'backward' }) => {
@@ -261,7 +264,7 @@ const SeekIndicator = ({ time, direction }: { time: number; direction: 'forward'
   );
 };
 
-export function PlaybackInterface({ tracks, volume }: PlaybackInterfaceProps) {
+export function PlaybackInterface({ tracks, volume, mixPlan, mixSequence }: PlaybackInterfaceProps) {
     const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
     const [isPlaying, setIsPlaying] = useState(false);
     const [timeInTrack, setTimeInTrack] = useState(0);
@@ -286,6 +289,33 @@ export function PlaybackInterface({ tracks, volume }: PlaybackInterfaceProps) {
     const tapTimer = useRef<NodeJS.Timeout | null>(null);
     const lastTapArea = useRef<string | null>(null);
     const isSeekingRef = useRef<'forward' | 'backward' | null>(null);
+
+    // Log de información de la secuencia optimizada
+    useEffect(() => {
+        if (mixSequence) {
+            console.log('🎵 Secuencia A* cargada en PlaybackInterface:');
+            console.log(`   📈 Score total: ${mixSequence.totalScore.toFixed(2)}/100`);
+            console.log(`   📊 Score promedio transiciones: ${mixSequence.avgTransitionScore.toFixed(2)}/100`);
+            console.log(`   🎧 Tracks en secuencia:`);
+            mixSequence.tracks.forEach((t: any, i: number) => {
+                console.log(`      ${i + 1}. ${t.track.title} - ${t.track.artist}`);
+                if (t.transition) {
+                    console.log(`         → Transición: ${t.transition.type} (${t.transition.crossfadeDurationMs}ms, score: ${t.transition.score.toFixed(1)})`);
+                }
+            });
+        }
+    }, [mixSequence]);
+
+    useEffect(() => {
+        if (mixPlan) {
+            console.log('📋 Mix Plan cargado:');
+            mixPlan.forEach((entry, i) => {
+                console.log(`   ${i + 1}. ${entry.title} - ${entry.artist}`);
+                console.log(`      → ${entry.bestEntryPoints.length} puntos de entrada`);
+                console.log(`      → ${entry.bestExitPoints.length} puntos de salida`);
+            });
+        }
+    }, [mixPlan]);
 
     const currentTrack = tracks[currentTrackIndex];
     const songProgress = (timeInTrack / (currentTrack?.duration || 1)) * 100;
@@ -681,6 +711,13 @@ export function PlaybackInterface({ tracks, volume }: PlaybackInterfaceProps) {
               <span>{currentTrack.analisis.tonalidad_camelot}</span>
               <span>•</span>
               <span className="capitalize">{currentTrack.analisis.animo_general}</span>
+            </div>
+          )}
+          {mixSequence && (
+            <div className="flex items-center justify-center gap-2 mt-2">
+              <div className="px-3 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium">
+                🎯 Secuencia A* • Score: {mixSequence.totalScore.toFixed(0)}/100
+              </div>
             </div>
           )}
         </div>
