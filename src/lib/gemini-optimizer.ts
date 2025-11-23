@@ -250,7 +250,6 @@ export interface CancionAnalizada {
   id?: string;
   hash_archivo: string;
   titulo: string;
-  artista: string;
 
   // Métricas básicas
   bpm: number;
@@ -266,7 +265,6 @@ export interface CancionAnalizada {
   beats_ts_ms: number[];
   downbeats_ts_ms: number[];
   frases_ts_ms: number[];
-  transientes_ritmicos_ts_ms: number[];
 
   // Transcripción palabra por palabra
   palabras: Array<{
@@ -799,16 +797,13 @@ export async function analizarConGeminiOptimizado(params: {
     downbeats_ts_ms: number[];
     beats_ts_ms: number[];
     frases_ts_ms: number[];
-    transientes_ritmicos_ts_ms: number[];
     ritmoAvanzado?: {
       beats_loudness?: number[];
-      onset_rate?: number;
     };
   };
   // Datos adicionales para CancionAnalizada
   hash_archivo: string;
   titulo: string;
-  artista: string;
   apiKeyOverride?: string;
   jobId?: string;
 }): Promise<CancionAnalizada> {
@@ -1082,20 +1077,44 @@ IMPORTANTE: Sé rápido y preciso. Timestamps en milisegundos.`;
     throw new Error('Respuesta JSON inválida de Gemini');
   }
 
-  // VALIDACIÓN CRÍTICA: Detectar respuestas vacías
-  const tienePalabras = Array.isArray(resultado.transcripcion?.palabras) && resultado.transcripcion.palabras.length > 0;
-  const tieneHuecos = Array.isArray(resultado.transcripcion?.analisis_huecos);
-  const tieneEstructura = Array.isArray(resultado.estructura) && resultado.estructura.length > 0;
-  const tieneTema = resultado.tema && (resultado.tema.palabras_clave?.length > 0 || resultado.tema.emocion);
+  // 🔒 VALIDACIÓN EXHAUSTIVA: Verificar TODOS los campos obligatorios
+  const validaciones = {
+    transcripcion: !!resultado.transcripcion,
+    palabras: Array.isArray(resultado.transcripcion?.palabras),
+    analisis_huecos: Array.isArray(resultado.transcripcion?.analisis_huecos),
+    estructura: Array.isArray(resultado.estructura) && resultado.estructura.length > 0,
+    tema: !!resultado.tema,
+    palabras_clave: Array.isArray(resultado.tema?.palabras_clave),
+    emocion: !!resultado.tema?.emocion,
+    eventos_dj: Array.isArray(resultado.eventos_dj)
+  };
 
-  // Si TODO está vacío, es una respuesta inválida
-  if (!tienePalabras && !tieneHuecos && !tieneEstructura && !tieneTema) {
-    console.error('❌ Gemini devolvió respuesta vacía - datos inválidos');
-    console.error('Respuesta recibida:', JSON.stringify(resultado, null, 2));
-    throw new Error('Gemini devolvió respuesta vacía. Reintentando...');
+  // Lista de campos críticos OBLIGATORIOS (deben existir siempre)
+  const camposFaltantes: string[] = [];
+  if (!validaciones.transcripcion) camposFaltantes.push('transcripcion');
+  if (!validaciones.palabras) camposFaltantes.push('transcripcion.palabras (array)');
+  if (!validaciones.analisis_huecos) camposFaltantes.push('transcripcion.analisis_huecos (array)');
+  if (!validaciones.estructura) camposFaltantes.push('estructura (array con elementos)');
+  if (!validaciones.tema) camposFaltantes.push('tema');
+  if (!validaciones.palabras_clave) camposFaltantes.push('tema.palabras_clave (array)');
+  if (!validaciones.emocion) camposFaltantes.push('tema.emocion');
+  if (!validaciones.eventos_dj) camposFaltantes.push('eventos_dj (array)');
+
+  // ❌ Si falta CUALQUIER campo obligatorio, rechazar respuesta y reintentar
+  if (camposFaltantes.length > 0) {
+    console.error('❌ Gemini devolvió respuesta INCOMPLETA - campos faltantes:');
+    console.error(`   📋 Faltantes: ${camposFaltantes.join(', ')}`);
+    console.error('   📄 Respuesta recibida:', JSON.stringify(resultado, null, 2));
+    throw new Error(`Gemini devolvió respuesta incompleta. Faltan: ${camposFaltantes.join(', ')}. Reintentando...`);
   }
 
-  console.log(`📊 Validación: palabras=${tienePalabras}, huecos=${tieneHuecos}, estructura=${tieneEstructura}, tema=${tieneTema}`);
+  // ✅ Log de validación exitosa
+  console.log(`📊 Validación COMPLETA:`);
+  console.log(`   ✅ Palabras: ${resultado.transcripcion.palabras.length}`);
+  console.log(`   ✅ Huecos: ${resultado.transcripcion.analisis_huecos.length}`);
+  console.log(`   ✅ Estructura: ${resultado.estructura.length} secciones`);
+  console.log(`   ✅ Tema: ${resultado.tema.palabras_clave.length} palabras clave, emoción: ${resultado.tema.emocion}`);
+  console.log(`   ✅ Eventos DJ: ${resultado.eventos_dj.length}`);
 
   // Sanitización básica
   const palabrasSanitizadas = Array.isArray(resultado.transcripcion?.palabras)
@@ -1187,7 +1206,6 @@ IMPORTANTE: Sé rápido y preciso. Timestamps en milisegundos.`;
   return {
     hash_archivo: params.hash_archivo,
     titulo: params.titulo,
-    artista: params.artista,
     bpm: params.analisisTecnico.bpm,
     tonalidad_camelot: params.analisisTecnico.tonalidad_camelot,
     tonalidad_compatible: params.analisisTecnico.tonalidad_compatible,
@@ -1199,7 +1217,6 @@ IMPORTANTE: Sé rápido y preciso. Timestamps en milisegundos.`;
     beats_ts_ms: params.analisisTecnico.beats_ts_ms,
     downbeats_ts_ms: params.analisisTecnico.downbeats_ts_ms,
     frases_ts_ms: params.analisisTecnico.frases_ts_ms,
-    transientes_ritmicos_ts_ms: params.analisisTecnico.transientes_ritmicos_ts_ms,
     palabras: palabrasSanitizadas,
     huecos_analizados: huecosSanitizados,
     estructura: estructuraSanitizada,

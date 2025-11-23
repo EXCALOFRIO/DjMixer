@@ -4,7 +4,6 @@ export interface CuePoint {
   trackId: string;
   hash: string;
   title: string;
-  artist: string;
   type: 'IN' | 'OUT';
   pointMs: number;
   sectionType?: string;
@@ -16,7 +15,6 @@ export interface MixPlanEntry {
   trackId: string;
   hash: string;
   title: string;
-  artist: string;
   durationMs: number;
   bestEntryPoints: CuePoint[];
   bestExitPoints: CuePoint[];
@@ -58,7 +56,6 @@ export function buildMixPlan(tracks: CancionAnalizada[]): MixPlanEntry[] {
       trackId: track.id,
       hash: track.hash_archivo,
       title: track.titulo,
-      artist: track.artista,
       durationMs: duration,
       bestEntryPoints,
       bestExitPoints,
@@ -181,7 +178,6 @@ function findBestEntryPoints(
     trackId: track.id,
     hash: track.hash_archivo,
     title: track.titulo,
-    artist: track.artista,
     type: 'IN' as const,
     pointMs: c.pointMs,
     sectionType: c.section?.tipo_seccion,
@@ -308,7 +304,6 @@ function findBestExitPoints(
     trackId: track.id,
     hash: track.hash_archivo,
     title: track.titulo,
-    artist: track.artista,
     type: 'OUT' as const,
     pointMs: c.pointMs,
     sectionType: c.section?.tipo_seccion,

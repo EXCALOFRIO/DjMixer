@@ -335,15 +335,12 @@ export async function POST(request: NextRequest) {
 
     type CancionExtendida = CancionAnalizada & {
       segmentos_voz?: Array<{ start_ms: number; end_ms: number }>;
-      ritmo_avanzado?: { onset_rate?: number };
     };
 
     const cancionExtendida = cancion as CancionExtendida;
     const segmentosVoz = Array.isArray(cancionExtendida.segmentos_voz)
       ? cancionExtendida.segmentos_voz
       : [];
-    const ritmoAvanzado = cancionExtendida.ritmo_avanzado;
-    const onsetRate = typeof ritmoAvanzado?.onset_rate === 'number' ? ritmoAvanzado.onset_rate : 0;
 
     console.log('🎯 Llamando a analizarConGeminiOptimizado con buffer inline:');
     console.log(`   - fileBuffer size: ${buffer.length} bytes`);
@@ -354,7 +351,6 @@ export async function POST(request: NextRequest) {
     const analisisCompleto = await analizarConGeminiOptimizado({
       hash_archivo: hash,
       titulo: cancion.titulo || 'Desconocido',
-      artista: cancion.artista || 'Desconocido',
       fileBuffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer, // ✅ Cast explícito para TS
       fileMimeType: mimeType,
       // NO apiKeyOverride - permite rotación automática
@@ -371,16 +367,45 @@ export async function POST(request: NextRequest) {
         beats_ts_ms: cancion.beats_ts_ms || [],
         downbeats_ts_ms: cancion.downbeats_ts_ms || [],
         frases_ts_ms: cancion.frases_ts_ms || [],
-        transientes_ritmicos_ts_ms: cancion.transientes_ritmicos_ts_ms || [],
-        ritmoAvanzado: {
-          onset_rate: onsetRate,
-        },
       },
       segmentosVoz,
-      nombreCancion: `${cancion.titulo} - ${cancion.artista}`,
+      nombreCancion: cancion.titulo || 'Desconocido',
     });
 
     const palabras = Array.isArray(analisisCompleto.palabras) ? analisisCompleto.palabras : [];
+
+    // 🔒 VALIDACIÓN EXHAUSTIVA de la respuesta de Gemini
+    const camposFaltantes: string[] = [];
+    
+    if (!analisisCompleto.estructura || !Array.isArray(analisisCompleto.estructura) || analisisCompleto.estructura.length === 0) {
+      camposFaltantes.push('estructura (vacía o no es array)');
+    }
+    if (!analisisCompleto.huecos_analizados || !Array.isArray(analisisCompleto.huecos_analizados)) {
+      camposFaltantes.push('huecos_analizados (no es array)');
+    }
+    if (!analisisCompleto.tema || typeof analisisCompleto.tema !== 'object') {
+      camposFaltantes.push('tema (no existe o no es objeto)');
+    } else {
+      if (!Array.isArray(analisisCompleto.tema.palabras_clave)) {
+        camposFaltantes.push('tema.palabras_clave (no es array)');
+      }
+      if (!analisisCompleto.tema.emocion) {
+        camposFaltantes.push('tema.emocion (vacío)');
+      }
+    }
+    if (!analisisCompleto.eventos_dj || !Array.isArray(analisisCompleto.eventos_dj)) {
+      camposFaltantes.push('eventos_dj (no es array)');
+    }
+
+    // ❌ Si falta algún campo obligatorio, rechazar y lanzar error para reintentar
+    if (camposFaltantes.length > 0) {
+      console.error('❌ Gemini devolvió datos INCOMPLETOS:', camposFaltantes.join(', '));
+      console.error('   Respuesta recibida:', JSON.stringify(analisisCompleto, null, 2));
+      throw new ClientFacingError(
+        `Gemini devolvió respuesta incompleta. Faltan: ${camposFaltantes.join(', ')}`,
+        422
+      );
+    }
 
     const respuesta: GeminiEnriquecidoResponse = {
       transcripcion: {

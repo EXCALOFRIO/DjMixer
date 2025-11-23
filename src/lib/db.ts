@@ -19,7 +19,6 @@ export type CancionAnalizada = {
   id: string;
   hash_archivo: string;
   titulo: string;
-  artista: string;
   duracion_ms: number;
   bpm: number | null;
   tonalidad_camelot: string | null;
@@ -31,7 +30,6 @@ export type CancionAnalizada = {
   downbeats_ts_ms: number[] | null;
   beats_ts_ms: number[] | null;
   frases_ts_ms: number[] | null;
-  transientes_ritmicos_ts_ms: number[] | null;
   cue_points: CuePoint[] | null;
   mix_in_point: number | null;
   mix_out_point: number | null;

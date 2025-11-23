@@ -255,45 +255,99 @@ export default function Home() {
 
             // PASO 2: Gemini (si no viene de caché O si está pendiente)
             if (needsGemini) {
-              await ejecutarGeminiConLimite(async () => {
+              const MAX_REINTENTOS_GEMINI = 3;
+              let reintentoGemini = 0;
+              let geminiExitoso = false;
+
+              while (reintentoGemini < MAX_REINTENTOS_GEMINI && !geminiExitoso) {
                 try {
-                  // Enviar el archivo MP3 completo (no solo el hash)
-                  const formData = new FormData();
-                  formData.append('file', track.file); // ⚠️ Campo correcto: 'file'
-                  formData.append('hash', data.hash);
+                  await ejecutarGeminiConLimite(async () => {
+                    // Enviar el archivo MP3 completo (no solo el hash)
+                    const formData = new FormData();
+                    formData.append('file', track.file); // ⚠️ Campo correcto: 'file'
+                    formData.append('hash', data.hash);
 
-                  const geminiResp = await fetch('/api/enrich-gemini', {
-                    method: 'POST',
-                    body: formData // FormData incluye el archivo
-                  });
+                    const geminiResp = await fetch('/api/enrich-gemini', {
+                      method: 'POST',
+                      body: formData // FormData incluye el archivo
+                    });
 
-                  if (geminiResp.ok) {
-                    const geminiData = await geminiResp.json();
+                    if (geminiResp.ok) {
+                      const geminiData = await geminiResp.json();
 
-                    setTracks(prev => prev.map(t =>
-                      t.hash === data.hash && t.analisis
-                        ? {
-                          ...t,
-                          analisis: {
-                            ...t.analisis,
-                            genero: geminiData.gemini?.genero,
-                            subgenero: geminiData.gemini?.subgenero,
-                            emocion_principal: geminiData.gemini?.emocion_principal,
-                            intensidad_emocional: geminiData.gemini?.intensidad_emocional
-                          } as CancionAnalizada,
-                          geminiPending: false // ✅ Marcamos como completado para desbloquear el mix
+                      // 🔒 VALIDACIÓN EXHAUSTIVA de la respuesta
+                      const camposFaltantes: string[] = [];
+                      
+                      if (!geminiData.gemini) {
+                        camposFaltantes.push('gemini');
+                      } else {
+                        if (!geminiData.gemini.estructura || !Array.isArray(geminiData.gemini.estructura) || geminiData.gemini.estructura.length === 0) {
+                          camposFaltantes.push('estructura');
                         }
+                        if (!geminiData.gemini.huecos || !Array.isArray(geminiData.gemini.huecos)) {
+                          camposFaltantes.push('huecos');
+                        }
+                        if (!geminiData.gemini.tema || !geminiData.gemini.tema.palabras_clave || !geminiData.gemini.tema.emocion) {
+                          camposFaltantes.push('tema completo');
+                        }
+                        if (!geminiData.gemini.eventos_dj || !Array.isArray(geminiData.gemini.eventos_dj)) {
+                          camposFaltantes.push('eventos_dj');
+                        }
+                        if (!geminiData.gemini.transcripcion || !Array.isArray(geminiData.gemini.transcripcion.palabras)) {
+                          camposFaltantes.push('transcripcion.palabras');
+                        }
+                      }
+
+                      if (camposFaltantes.length > 0) {
+                        console.warn(`   ⚠️ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Respuesta Gemini incompleta (intento ${reintentoGemini + 1}/${MAX_REINTENTOS_GEMINI})`);
+                        console.warn(`      Campos faltantes: ${camposFaltantes.join(', ')}`);
+                        throw new Error(`Respuesta Gemini incompleta - faltan: ${camposFaltantes.join(', ')}`);
+                      }
+
+                      setTracks(prev => prev.map(t =>
+                        t.hash === data.hash && t.analisis
+                          ? {
+                            ...t,
+                            analisis: {
+                              ...t.analisis,
+                              genero: geminiData.gemini?.genero,
+                              subgenero: geminiData.gemini?.subgenero,
+                              emocion_principal: geminiData.gemini?.emocion_principal,
+                              intensidad_emocional: geminiData.gemini?.intensidad_emocional
+                            } as CancionAnalizada,
+                            geminiPending: false // ✅ Marcamos como completado para desbloquear el mix
+                          }
+                          : t
+                      ));
+
+                      console.log(`   🤖 [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Gemini OK`);
+                      geminiExitoso = true; // ✅ Marcar como exitoso
+                    } else {
+                      const errorText = await geminiResp.text().catch(() => 'Error desconocido');
+                      console.warn(`   ⚠️ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Gemini falló (${geminiResp.status}): ${errorText}`);
+                      throw new Error(`HTTP ${geminiResp.status}: ${errorText}`);
+                    }
+                  });
+                } catch (error) {
+                  reintentoGemini++;
+                  console.warn(`   ⚠️ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Error Gemini (intento ${reintentoGemini}/${MAX_REINTENTOS_GEMINI}):`, error instanceof Error ? error.message : error);
+                  
+                  // Si llegamos al máximo de reintentos, marcar como no pendiente para no bloquear
+                  if (reintentoGemini >= MAX_REINTENTOS_GEMINI) {
+                    console.error(`   ❌ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Gemini falló tras ${MAX_REINTENTOS_GEMINI} intentos`);
+                    
+                    // 🔓 Desbloquear track aunque falle Gemini para permitir el mix
+                    setTracks(prev => prev.map(t =>
+                      t.hash === data.hash
+                        ? { ...t, geminiPending: false }
                         : t
                     ));
-
-                    console.log(`   🤖 [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Gemini OK`);
                   } else {
-                    console.error(`   ⚠️ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Gemini falló`);
+                    // Esperar antes de reintentar (backoff exponencial)
+                    await new Promise(resolve => setTimeout(resolve, 1000 * reintentoGemini));
                   }
-                } catch (error) {
-                  console.error(`   ⚠️ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Error Gemini:`, error);
                 }
-              });
+              }
             }
 
             return { track, essentiaData: data, geminiSuccess: data.fromCache ? null : true };

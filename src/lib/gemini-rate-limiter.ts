@@ -134,15 +134,12 @@ class GeminiRateLimiterImpl implements GeminiRateLimiter {
         downbeats_ts_ms: analisisTecnico.downbeats_ts_ms,
         beats_ts_ms: analisisTecnico.beats_ts_ms,
         frases_ts_ms: analisisTecnico.frases_ts_ms,
-        transientes_ritmicos_ts_ms: analisisTecnico.transientes_ritmicos_ts_ms,
         ritmoAvanzado: {
           beats_loudness: analisisTecnico.ritmo_avanzado?.beats_loudness || [],
-          onset_rate: analisisTecnico.ritmo_avanzado?.onset_rate,
         },
       },
       hash_archivo: hash,
       titulo: filePathOrUri || hash,
-      artista: 'Desconocido',
       apiKeyOverride: state.key,
     })
       .then((result) => {

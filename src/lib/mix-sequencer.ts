@@ -205,7 +205,7 @@ export function findOptimalSequence(
     return null;
   }
 
-  console.log(`🎵 Canción inicial: ${startTrack.titulo} - ${startTrack.artista}`);
+  console.log(`🎵 Canción inicial: ${startTrack.titulo}`);
 
   // Estado inicial
   const initialState: AStarState = {

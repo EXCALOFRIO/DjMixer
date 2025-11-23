@@ -1,19 +1,18 @@
 -- ===================================================================
--- SCHEMA OPTIMIZADO - SOLO LO QUE SE USA REALMENTE
+-- SCHEMA ULTRA-OPTIMIZADO - SOLO LO ESENCIAL PARA EL MIX
 -- ===================================================================
--- Elimina todas las columnas de Essentia que siempre están NULL
--- Mantiene solo las métricas básicas necesarias para DJs
+-- Eliminadas TODAS las columnas que no se usan en el algoritmo de mix
+-- Máxima velocidad y eficiencia
 -- ===================================================================
 
 CREATE TABLE IF NOT EXISTS canciones_analizadas (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     hash_archivo VARCHAR(256) UNIQUE NOT NULL,
     titulo TEXT NOT NULL,
-    artista TEXT NOT NULL,
     duracion_ms INTEGER NOT NULL,
     
     -- ===================================================================
-    -- MÉTRICAS BÁSICAS (LAS QUE SÍ SE USAN)
+    -- MÉTRICAS BÁSICAS (ESENCIALES PARA MIX)
     -- ===================================================================
     bpm FLOAT NOT NULL CHECK (bpm > 0 AND bpm < 300),
     tonalidad_camelot VARCHAR(3) NOT NULL,
@@ -58,7 +57,6 @@ CREATE TABLE IF NOT EXISTS canciones_analizadas (
 -- ÍNDICES PARA OPTIMIZAR CONSULTAS
 -- ===================================================================
 CREATE INDEX IF NOT EXISTS idx_hash_archivo ON canciones_analizadas(hash_archivo);
-CREATE INDEX IF NOT EXISTS idx_artista ON canciones_analizadas(artista);
 CREATE INDEX IF NOT EXISTS idx_bpm ON canciones_analizadas(bpm);
 CREATE INDEX IF NOT EXISTS idx_tonalidad ON canciones_analizadas(tonalidad_camelot);
 CREATE INDEX IF NOT EXISTS idx_energia ON canciones_analizadas(energia);
