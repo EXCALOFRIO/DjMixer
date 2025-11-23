@@ -989,7 +989,7 @@ IMPORTANTE: Sé rápido y preciso. Timestamps en milisegundos.`;
 
   // Usar modelo más rápido primero, fallback a flash si falla
   const modelos = [
-    { id: 'models/gemini-flash-lite-latest', label: 'Gemini Flash Lite (rápido)' },
+    { id: 'models/gemini-flash-latest', label: 'Gemini Flash Lite (rápido)' },
     { id: 'models/gemini-flash-latest', label: 'Gemini Flash (fallback)' },
   ];
 
