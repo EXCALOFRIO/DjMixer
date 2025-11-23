@@ -153,7 +153,6 @@ export async function POST(request: NextRequest) {
     const idDB = await guardarAnalisisEnDB({
       hash,
       titulo,
-      artista,
       analisis: analisisEssentia
     });
 
