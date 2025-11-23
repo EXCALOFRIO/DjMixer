@@ -78,7 +78,7 @@ export class ClassicFadeTransition extends MixTransition {
       for (const entryPoint of entryPoints) {
         // Calcular duración del crossfade basada en márgenes vocales
         // Usamos el mínimo para evitar cortar voces en cualquiera de los dos tracks
-        const crossfadeDurationMs = Math.min(
+        let crossfadeDurationMs = Math.min(
           exitPoint.vocalMarginMs,
           entryPoint.vocalMarginMs
         );
@@ -89,8 +89,8 @@ export class ClassicFadeTransition extends MixTransition {
         }
 
         if (crossfadeDurationMs > 12000) {
-          // Limitar a 12 segundos máximo
-          // crossfadeDurationMs = 12000; // Podríamos limitar o simplemente dar menos puntos
+          // Limitar a 12 segundos máximo si hay mucho espacio (o es infinito/instrumental)
+          crossfadeDurationMs = 12000;
         }
 
         // Calcular puntuación del crossfade

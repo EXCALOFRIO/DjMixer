@@ -8,6 +8,8 @@ import { PlaybackInterface } from "@/components/music/playback-interface";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { useApiHealthCheck } from "@/hooks/use-api-health-check";
+import { HealthCheckDisplay } from "@/components/health-check-display";
 import * as musicMetadata from "music-metadata-browser";
 import type { CancionAnalizada } from "@/lib/db";
 import type { MixPlanEntry } from "@/lib/mix-planner";
@@ -22,6 +24,7 @@ export type Track = {
   url: string;
   hash: string | null;
   analisis?: CancionAnalizada | null;
+  geminiPending?: boolean;
 };
 
 export default function Home() {
@@ -34,17 +37,20 @@ export default function Home() {
   const { toast } = useToast();
   const mixPlanHashRef = useRef<string | null>(null);
 
+  // 🏥 Health check de API keys al cargar la aplicación
+  const healthCheck = useApiHealthCheck();
+
   const fetchAlbumArtFromAPI = async (artist: string, album: string): Promise<string | null> => {
     try {
       const response = await fetch(
         `https://musicbrainz.org/ws/2/release/?query=artist:${encodeURIComponent(artist)}%20AND%20release:${encodeURIComponent(album)}&fmt=json&limit=1`
       );
       const data = await response.json();
-      
+
       if (data.releases && data.releases.length > 0) {
         const releaseId = data.releases[0].id;
         const artUrl = `https://coverartarchive.org/release/${releaseId}/front-250`;
-        
+
         const artResponse = await fetch(artUrl);
         if (artResponse.ok) {
           return artUrl;
@@ -66,14 +72,14 @@ export default function Home() {
     console.log('📋 Extrayendo metadatos básicos de', files.length, 'archivos...');
     const formDataMetadata = new FormData();
     files.forEach(file => formDataMetadata.append('files', file));
-    
+
     let metadatosRapidos: any[] = [];
     try {
       const response = await fetch('/api/metadata', {
         method: 'POST',
         body: formDataMetadata,
       });
-      
+
       if (response.ok) {
         const data = await response.json();
         metadatosRapidos = data.canciones || [];
@@ -100,9 +106,9 @@ export default function Home() {
       try {
         const metadata = await musicMetadata.parseBlob(file);
         const { common } = metadata;
-        
+
         let artwork: string | null = null;
-        
+
         if (common.picture?.[0]) {
           const picture = common.picture[0];
           const base64 = btoa(
@@ -126,6 +132,7 @@ export default function Home() {
           url,
           hash,
           analisis: analisisExistente,
+          geminiPending: metadato?.geminiPending || false,
         };
 
         newTracks.push(track);
@@ -140,24 +147,24 @@ export default function Home() {
     setTracks((prev) => [...prev, ...newTracks]);
 
     // PASO 3: Análisis PARALELO REAL con Promise.all
-    const tracksParaAnalizar = newTracks.filter(track => !track.analisis);
-    
+    const tracksParaAnalizar = newTracks.filter(track => !track.analisis || track.geminiPending);
+
     if (tracksParaAnalizar.length > 0) {
       console.log(`🚀 Analizando ${tracksParaAnalizar.length} canciones en PARALELO...`);
       console.log(`   ⚡ Essentia: máx 10 simultáneas`);
       console.log(`   🤖 Gemini: máx 25 simultáneas`);
-      
+
       // Advertencia para lotes muy grandes
       if (tracksParaAnalizar.length > 50) {
         console.warn(`⚠️ ADVERTENCIA: ${tracksParaAnalizar.length} canciones es un lote grande.`);
         console.warn(`   Considera procesar en grupos de 50 para mejor estabilidad.`);
       }
-      
+
       try {
         // 1️⃣ ANÁLISIS ESSENTIA + GEMINI - PIPELINE PARALELO REAL
         console.log('\n📊 Lanzando análisis Essentia + Gemini en pipeline...');
         console.log('   ⚡ Cada canción lanza Gemini inmediatamente tras Essentia');
-        
+
         // Obtener configuración de Gemini
         let MAX_GEMINI_CONCURRENTES = 25;
         try {
@@ -174,7 +181,7 @@ export default function Home() {
         const MAX_ESSENTIA_CONCURRENTES = 10; // Limitar Essentia para no saturar servidor
         let essentiaEnCurso = 0;
         let geminiEnCurso = 0;
-        
+
         const ejecutarEssentiaConLimite = async (fn: () => Promise<any>) => {
           while (essentiaEnCurso >= MAX_ESSENTIA_CONCURRENTES) {
             await new Promise(resolve => setTimeout(resolve, 200));
@@ -186,7 +193,7 @@ export default function Home() {
             essentiaEnCurso--;
           }
         };
-        
+
         const ejecutarGeminiConLimite = async (fn: () => Promise<void>) => {
           while (geminiEnCurso >= MAX_GEMINI_CONCURRENTES) {
             await new Promise(resolve => setTimeout(resolve, 100));
@@ -201,7 +208,7 @@ export default function Home() {
 
         const promesasPipeline = tracksParaAnalizar.map(async (track, index) => {
           const numActual = index + 1;
-          
+
           // PASO 1: Essentia (con límite de concurrencia)
           try {
             const data = await ejecutarEssentiaConLimite(async () => {
@@ -222,28 +229,32 @@ export default function Home() {
 
               return await response.json();
             });
-            
+
             if (!data || !data.analisis) {
               console.error(`   ❌ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Respuesta sin análisis`);
               return { track, essentiaData: null, geminiSuccess: false };
             }
-            
+
             console.log(`   ✅ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Essentia OK`);
 
+            // Determinar si necesita Gemini (si es nuevo o si ya estaba pendiente)
+            const needsGemini = (!data.fromCache || data.geminiPending) && data.hash;
+
             // Actualizar track inmediatamente con datos de Essentia
-            setTracks(prev => prev.map(t => 
+            setTracks(prev => prev.map(t =>
               t.file.name === track.file.name
                 ? {
-                    ...t,
-                    hash: data.hash,
-                    duration: data.analisis.duracion_ms ? data.analisis.duracion_ms / 1000 : t.duration,
-                    analisis: data.analisis as CancionAnalizada
-                  }
+                  ...t,
+                  hash: data.hash,
+                  duration: data.analisis.duracion_ms ? data.analisis.duracion_ms / 1000 : t.duration,
+                  analisis: data.analisis as CancionAnalizada,
+                  geminiPending: !!needsGemini // 🔒 FORZAR PENDIENTE para evitar que el mix arranque antes de tiempo
+                }
                 : t
             ));
 
-            // PASO 2: Gemini (solo si no viene de caché)
-            if (!data.fromCache && data.hash) {
+            // PASO 2: Gemini (si no viene de caché O si está pendiente)
+            if (needsGemini) {
               await ejecutarGeminiConLimite(async () => {
                 try {
                   // Enviar el archivo MP3 completo (no solo el hash)
@@ -258,19 +269,20 @@ export default function Home() {
 
                   if (geminiResp.ok) {
                     const geminiData = await geminiResp.json();
-                    
-                    setTracks(prev => prev.map(t => 
+
+                    setTracks(prev => prev.map(t =>
                       t.hash === data.hash && t.analisis
                         ? {
-                            ...t,
-                            analisis: {
-                              ...t.analisis,
-                              genero: geminiData.gemini?.genero,
-                              subgenero: geminiData.gemini?.subgenero,
-                              emocion_principal: geminiData.gemini?.emocion_principal,
-                              intensidad_emocional: geminiData.gemini?.intensidad_emocional
-                            } as CancionAnalizada
-                          }
+                          ...t,
+                          analisis: {
+                            ...t.analisis,
+                            genero: geminiData.gemini?.genero,
+                            subgenero: geminiData.gemini?.subgenero,
+                            emocion_principal: geminiData.gemini?.emocion_principal,
+                            intensidad_emocional: geminiData.gemini?.intensidad_emocional
+                          } as CancionAnalizada,
+                          geminiPending: false // ✅ Marcamos como completado para desbloquear el mix
+                        }
                         : t
                     ));
 
@@ -295,20 +307,20 @@ export default function Home() {
 
         // Esperar a que TODAS terminen (pero ya se van procesando en paralelo)
         const resultados = await Promise.all(promesasPipeline);
-        
+
         const exitosos = resultados.filter(r => r.essentiaData);
         const geminiExitosos = resultados.filter(r => r.geminiSuccess === true);
-        
+
         console.log(`\n✅ Pipeline completado:`);
         console.log(`   📊 Essentia: ${exitosos.length}/${tracksParaAnalizar.length}`);
         console.log(`   🤖 Gemini: ${geminiExitosos.length}/${resultados.filter(r => r.essentiaData && !r.essentiaData.fromCache).length}`);
-        
+
         setUploadProgress(100);
-        
+
         // Notificar resultado final
         const exitososTotal = exitosos.length;
         const falliosTotal = tracksParaAnalizar.length - exitososTotal;
-        
+
         if (falliosTotal > 0) {
           toast({
             title: "Análisis completado con errores",
@@ -338,7 +350,7 @@ export default function Home() {
     }
 
     setIsUploading(false);
-    
+
     toast({
       title: "Procesamiento completado",
       description: `${newTracks.length} canción(es) cargada(s)`,
@@ -351,9 +363,11 @@ export default function Home() {
 
   // Mostrar importer solo si no hay tracks
   const showImporter = tracks.length === 0;
-  
-  // Mostrar player solo si hay tracks Y todos están analizados Y tenemos la secuencia
-  const todosAnalizados = tracks.length > 0 && tracks.every(t => Boolean(t.analisis && t.analisis.hash_archivo));
+
+  // Mostrar player solo si hay tracks Y todos están analizados Y NO hay pendientes de Gemini
+  const todosAnalizados = tracks.length > 0 && tracks.every(t =>
+    Boolean(t.analisis && t.analisis.hash_archivo) && !t.geminiPending
+  );
   const showPlayer = todosAnalizados && !isUploading && mixSequence !== null;
 
   useEffect(() => {
@@ -395,7 +409,7 @@ export default function Home() {
       .then(({ plan }) => {
         setMixPlan(plan);
         console.log('✅ Mix plan calculado con top 5 puntos de entrada/salida por canción');
-        
+
         toast({
           title: "Mix Plan Generado",
           description: `${plan.length} canciones con puntos de entrada/salida identificados`,
@@ -406,7 +420,7 @@ export default function Home() {
         return fetch('/api/mix-sequence', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
+          body: JSON.stringify({
             hashes,
             sessionLength: Math.min(hashes.length, 10) // Máximo 10 canciones en la secuencia
           }),
@@ -423,7 +437,7 @@ export default function Home() {
         console.log('✅ Secuencia A* generada:', session);
         console.log(`   📈 Score total: ${session.totalScore.toFixed(2)}`);
         console.log(`   📊 Score promedio transiciones: ${session.avgTransitionScore.toFixed(2)}`);
-        
+
         toast({
           title: "Secuencia Optimizada Generada",
           description: `${session.tracks.length} canciones ordenadas (Score: ${session.totalScore.toFixed(0)}/100)`,
@@ -442,11 +456,18 @@ export default function Home() {
 
   return (
     <>
+      <HealthCheckDisplay
+        loading={healthCheck.loading}
+        operationalCount={healthCheck.operationalCount}
+        totalCount={healthCheck.totalCount}
+        lastCheck={healthCheck.lastCheck}
+        results={healthCheck.results}
+      />
       <BackgroundVisualizer />
       <Header volume={volume} onVolumeChange={handleVolumeChange} />
       <main className="flex flex-col items-center justify-center min-h-screen p-4">
         <div className="container relative mx-auto flex flex-col items-center justify-center h-full flex-grow">
-          
+
           <div className={cn("absolute inset-0 flex items-center justify-center transition-opacity duration-500",
             showPlayer ? 'opacity-100' : 'opacity-0 pointer-events-none'
           )}>

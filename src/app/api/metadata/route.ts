@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
     const files = formData.getAll('files') as File[];
-    
+
     if (!files || files.length === 0) {
       return NextResponse.json(
         { error: 'No se proporcionaron archivos' },
@@ -39,9 +39,23 @@ export async function POST(request: NextRequest) {
 
           if (existente.length > 0) {
             const cancion = normalizeCancionRow(existente[0] as Record<string, unknown>);
+
+            // Verificar si el análisis de Gemini está incompleto
+            let geminiIncompleto = !cancion.analisis_contenido ||
+              (cancion.analisis_contenido as any).analisis_lirico_tematico?.tema_principal === 'Pendiente';
+
+            // Verificar también la tabla de jobs
+            if (!geminiIncompleto) {
+              const ultimoJob = await import('@/lib/analysis-jobs').then(m => m.obtenerUltimoJobPorHash(hash));
+              if (ultimoJob && ultimoJob.status !== 'completed') {
+                geminiIncompleto = true;
+              }
+            }
+
             return {
               hash,
               analizado: true,
+              geminiPending: geminiIncompleto,
               ...cancion,
             };
           }
@@ -81,9 +95,9 @@ export async function POST(request: NextRequest) {
   } catch (error: any) {
     console.error('❌ Error en API metadata:', error);
     return NextResponse.json(
-      { 
-        error: 'Error al extraer metadatos', 
-        details: error.message || 'Error desconocido' 
+      {
+        error: 'Error al extraer metadatos',
+        details: error.message || 'Error desconocido'
       },
       { status: 500 }
     );

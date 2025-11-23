@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
     const files = formData.getAll('files') as File[];
-    
+
     if (!files || files.length === 0) {
       return NextResponse.json(
         { error: 'No se proporcionaron archivos' },
@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
 
     const resultados: ResultadoProcesamiento[] = [];
     const tareasGemini: Array<{ hash: string; buffer: Buffer; analisis: any }> = [];
-    
+
     let cache = 0;
     let analizados = 0;
     let fallidos = 0;
@@ -60,92 +60,16 @@ export async function POST(request: NextRequest) {
     // ========================================================================
     // FASE 1: ANÁLISIS INSTANTÁNEO CON ESSENTIA (TODOS LOS ARCHIVOS)
     // ========================================================================
-    
+
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       console.log(`[${i + 1}/${files.length}] 🎵 ${file.name}`);
 
       try {
         // Leer archivo
-        const arrayBuffer = await file.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        const hash = calcularHashBuffer(buffer);
-
-        // Verificar caché
-        const existe = await existeCancionPorHash(hash);
-        
-        if (existe) {
-          console.log(`   💾 Recuperado de caché\n`);
-          
-          // TODO: Obtener datos completos de la canción
-          resultados.push({
-            nombre: file.name,
-            titulo: file.name.replace(/\.[^/.]+$/, ''),
-            artista: 'Desconocido',
-            bpm: 0,
-            tonalidad_camelot: '',
-            energia: 0,
-            bailabilidad: 0,
-            hash,
-            fase: 'cache',
-            geminiPendiente: false
-          });
-          
-          cache++;
-          continue;
-        }
-
-        // Análisis con Essentia (RÁPIDO, local)
-    
-        const inicioAnalisis = Date.now();
-        const analisisEssentia = await analizarAudioCompleto(buffer);
-        const tiempoAnalisis = ((Date.now() - inicioAnalisis) / 1000).toFixed(2);
-
-        console.log(`   ✅ Essentia: ${tiempoAnalisis}s`);
-        console.log(`      BPM: ${analisisEssentia.bpm.toFixed(1)} | ${analisisEssentia.tonalidad_camelot} | ${(analisisEssentia.energia * 100).toFixed(0)}% energía`);
-
-        // Extraer metadatos del nombre del archivo
-        const nombreSinExt = file.name.replace(/\.[^/.]+$/, '');
-        let titulo = nombreSinExt;
-        let artista = 'Desconocido';
-
-        if (nombreSinExt.includes(' - ')) {
-          const [art, tit] = nombreSinExt.split(' - ').map(s => s.trim());
-          artista = art;
-          titulo = tit;
-        }
-
-        // Guardar en BD INMEDIATAMENTE (sin esperar Gemini)
-        const idDB = await guardarAnalisisEnDB({
-          hash,
-          titulo,
-          artista,
-          analisis: analisisEssentia
-        });
-
-        console.log(`   💾 Guardado en DB (ID: ${idDB})`);
-        console.log(`   ⏭️  Lista para usar (Gemini en segundo plano)\n`);
-
-        resultados.push({
-          nombre: file.name,
-          titulo,
-          artista,
-          bpm: analisisEssentia.bpm,
-          tonalidad_camelot: analisisEssentia.tonalidad_camelot,
-          energia: analisisEssentia.energia,
-          bailabilidad: analisisEssentia.bailabilidad,
-          hash,
-          fase: 'essentia',
-          geminiPendiente: true
-        });
-
-        // Encolar para procesamiento Gemini
-        tareasGemini.push({ hash, buffer, analisis: analisisEssentia });
-        analizados++;
-
       } catch (error: any) {
         console.error(`   ❌ Error:`, error.message);
-        
+
         resultados.push({
           nombre: file.name,
           titulo: file.name.replace(/\.[^/.]+$/, ''),
@@ -160,7 +84,7 @@ export async function POST(request: NextRequest) {
           error: true,
           mensaje: error.message
         });
-        
+
         fallidos++;
       }
     }
@@ -168,7 +92,7 @@ export async function POST(request: NextRequest) {
     // ========================================================================
     // RESPUESTA INMEDIATA (Fase 1 completada)
     // ========================================================================
-    
+
     console.log(`\n📊 FASE 1 COMPLETADA:`);
     console.log(`   ✅ Analizados: ${analizados}`);
     console.log(`   💾 Desde caché: ${cache}`);
@@ -178,7 +102,7 @@ export async function POST(request: NextRequest) {
     // ========================================================================
     // FASE 2: GEMINI EN SEGUNDO PLANO (no bloqueante)
     // ========================================================================
-    
+
     if (tareasGemini.length > 0) {
       console.log(`🔄 Iniciando Fase 2 (Gemini) en segundo plano...`);
       console.log(`   🔑 ${rateLimiter.obtenerEstadisticas().totalApiKeys} API keys disponibles`);
@@ -204,7 +128,7 @@ export async function POST(request: NextRequest) {
         geminiPendiente: tareasGemini.length
       },
       resultados,
-      mensaje: tareasGemini.length > 0 
+      mensaje: tareasGemini.length > 0
         ? `${analizados} canciones listas. ${tareasGemini.length} análisis de Gemini en segundo plano.`
         : `${analizados} canciones completadas.`
     });
@@ -212,7 +136,7 @@ export async function POST(request: NextRequest) {
   } catch (error: any) {
     console.error('❌ Error en importación masiva:', error);
     return NextResponse.json(
-      { 
+      {
         error: error.message,
         stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       },
@@ -228,14 +152,14 @@ async function procesarGeminiBackground(
   tareas: Array<{ hash: string; buffer: Buffer; analisis: any }>
 ) {
   console.log(`\n🤖 FASE 2 GEMINI: Procesando ${tareas.length} canciones en segundo plano`);
-  
+
   const rateLimiter = obtenerRateLimiter();
   const promesas = tareas.map((tarea, index) =>
     procesarCancionConGemini(tarea, index + 1, tareas.length)
   );
 
   const resultados = await Promise.allSettled(promesas);
-  
+
   const exitosos = resultados.filter(r => r.status === 'fulfilled').length;
   const fallidos = resultados.filter(r => r.status === 'rejected').length;
 
@@ -257,7 +181,7 @@ async function procesarCancionConGemini(
     console.log(`[Gemini ${index}/${total}] 🤖 Hash: ${tarea.hash.substring(0, 8)}...`);
 
     const rateLimiter = obtenerRateLimiter();
-    
+
     // El rate limiter gestiona automáticamente la cola y rotación
     const datosGemini = await rateLimiter.analizarConGemini(
       tarea.hash,

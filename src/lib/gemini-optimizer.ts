@@ -322,7 +322,6 @@ export interface AnalisisHuecoInstrumental {
   tipo: 'instrumental_puro' | 'coros_melodicos' | 'adlibs_fx' | 'voz_principal_residuo';
   descripcion?: string;
   energia_relativa?: number; // 1-10
-  confianza: number; // 0-1
 }
 
 export interface TranscripcionSchema {
@@ -330,7 +329,6 @@ export interface TranscripcionSchema {
     palabra: string;
     inicio_ms: number;
     fin_ms: number;
-    confianza: number; // 0-1
   }>;
   analisis_huecos?: AnalisisHuecoInstrumental[];
 }
@@ -418,14 +416,8 @@ export async function transcribirAudio(
             palabra: { type: 'string', description: 'Palabra individual' },
             inicio_ms: { type: 'number', description: 'Timestamp exacto de inicio (debe estar dentro de un segmento VAD)' },
             fin_ms: { type: 'number', description: 'Timestamp exacto de fin (debe estar dentro de un segmento VAD)' },
-            confianza: {
-              type: 'number',
-              minimum: 0,
-              maximum: 1,
-              description: 'Confianza en la transcripción (0=incierto, 1=muy seguro)'
-            }
           },
-          required: ['palabra', 'inicio_ms', 'fin_ms', 'confianza']
+          required: ['palabra', 'inicio_ms', 'fin_ms']
         }
       },
       analisis_huecos: {
@@ -444,15 +436,9 @@ export async function transcribirAudio(
             descripcion: {
               type: 'string',
               description: 'Descripción del contenido (obligatorio si no es instrumental_puro)'
-            },
-            confianza: {
-              type: 'number',
-              minimum: 0,
-              maximum: 1,
-              description: 'Confianza en la clasificación del hueco (0=incierto, 1=muy seguro)'
             }
           },
-          required: ['inicio_ms', 'fin_ms', 'tipo', 'confianza']
+          required: ['inicio_ms', 'fin_ms', 'tipo']
         }
       }
     },
@@ -840,6 +826,7 @@ export async function analizarConGeminiOptimizado(params: {
   console.log(`⏱️  Duración: ${params.analisisTecnico.duracion_ms}ms (${Math.floor(params.analisisTecnico.duracion_ms / 1000)}s)`);
 
   // Schema SIMPLIFICADO para velocidad
+  // Schema OPTIMIZADO - sin campos innecesarios (confianza siempre 1, descripcion no usada)
   const completeSchema = {
     type: 'object',
     properties: {
@@ -868,8 +855,7 @@ export async function analizarConGeminiOptimizado(params: {
                 tipo: {
                   type: 'string',
                   enum: ['instrumental_puro', 'coros_melodicos', 'adlibs_fx', 'voz_principal_residuo']
-                },
-                descripcion: { type: 'string' }
+                }
               },
               required: ['inicio_ms', 'fin_ms', 'tipo']
             }
@@ -895,14 +881,13 @@ export async function analizarConGeminiOptimizado(params: {
       tema: {
         type: 'object',
         properties: {
-          resumen: { type: 'string' },
           palabras_clave: { type: 'array', items: { type: 'string' } },
           emocion: {
             type: 'string',
-            enum: ['alegre', 'triste', 'energético', 'romántico', 'melancólico', 'festivo', 'reflexivo']
+            enum: ['alegre', 'triste', 'energético', 'romántico', 'melancólico', 'festivo', 'reflexivo', 'neutral']
           }
         },
-        required: ['resumen', 'palabras_clave', 'emocion']
+        required: ['palabras_clave', 'emocion']
       },
       eventos_dj: {
         type: 'array',
@@ -913,8 +898,7 @@ export async function analizarConGeminiOptimizado(params: {
               type: 'string',
               enum: ['drop', 'break', 'build_up', 'cambio_ritmo', 'hook']
             },
-            tiempo_ms: { type: 'number' },
-            descripcion: { type: 'string' }
+            tiempo_ms: { type: 'number' }
           },
           required: ['tipo', 'tiempo_ms']
         }
@@ -962,39 +946,40 @@ export async function analizarConGeminiOptimizado(params: {
   }
   const perfilRmsFormateado = `[${rmsParaPrompt.map(v => v.toFixed(2)).join(',')}]`;
 
-  const prompt = `ANÁLISIS DJ EXPRESS.
-Objetivo: Transcripción alineada y estructura musical.
+  const prompt = `ANÁLISIS DJ EXPRESS - Transcripción y Estructura Musical
 
 DATOS TÉCNICOS:
 - Duración: ${duracionContexto}
-- Voz detectada (VAD): ${segmentosContexto}
-- Huecos (posible instrumental): ${huecosContexto}
-- Perfil Energía: ${perfilRmsFormateado}
+- Segmentos con voz (VAD): ${segmentosContexto}
+- Huecos instrumentales: ${huecosContexto}
+- Energía RMS: ${perfilRmsFormateado}
 - BPM: ${params.analisisTecnico.bpm} | Energía: ${(params.analisisTecnico.energia * 100).toFixed(0)}%
 
-TAREAS (JSON):
+TAREAS (devolver JSON):
+
 1. TRANSCRIPCIÓN (transcripcion.palabras):
-   - Transcribe la letra alineada con los segmentos VAD.
-   - Si hay voz fuera de VAD, inclúyela.
-   - 'inicio_ms' y 'fin_ms' exactos.
+   - Transcribe letra palabra por palabra
+   - Timestamps exactos: inicio_ms, fin_ms
+   - Alinear con segmentos VAD cuando sea posible
+   - Array vacío si es instrumental
 
 2. HUECOS (transcripcion.analisis_huecos):
-   - Clasifica los huecos: 'instrumental_puro', 'coros_melodicos', 'adlibs_fx', 'voz_principal_residuo'.
+   - Clasifica cada hueco: instrumental_puro | coros_melodicos | adlibs_fx | voz_principal_residuo
+   - Solo tipo, inicio_ms, fin_ms (sin descripción)
 
 3. ESTRUCTURA (estructura):
-   - Divide en: intro, verso, estribillo, puente, instrumental, outro, build_up.
-   - Usa cambios de energía y letra.
+   - Divide en secciones: intro, verso, estribillo, puente, instrumental, outro, build_up
+   - Usa cambios de energía y contenido lírico
 
 4. TEMA (tema):
-   - Resumen breve, palabras clave, emoción.
+   - palabras_clave: array de palabras importantes
+   - emocion: alegre | triste | energético | romántico | melancólico | festivo | reflexivo | neutral
 
 5. EVENTOS DJ (eventos_dj):
-   - Drops, breaks, hooks.
+   - Identifica: drop, break, build_up, cambio_ritmo, hook
+   - Solo tipo y tiempo_ms
 
-IMPORTANTE:
-- Sé rápido y preciso.
-- Usa timestamps en milisegundos.
-- Si es instrumental, devuelve arrays vacíos en transcripción.`;
+IMPORTANTE: Sé rápido y preciso. Timestamps en milisegundos.`;
 
   console.log('\n📝 PROMPT SIMPLIFICADO ENVIADO A GEMINI');
   if (params.jobId) {
@@ -1002,14 +987,17 @@ IMPORTANTE:
   }
 
 
+  // Usar modelo más rápido primero, fallback a flash si falla
   const modelos = [
-    { id: 'models/gemini-1.5-flash', label: 'Gemini 1.5 Flash' },
-    { id: 'models/gemini-flash-latest', label: 'Gemini Flash Legacy' },
+    { id: 'models/gemini-flash-lite-latest', label: 'Gemini Flash Lite (rápido)' },
+    { id: 'models/gemini-flash-latest', label: 'Gemini Flash (fallback)' },
   ];
 
-  const maxIntentosPorModelo = 2;
+  const maxIntentosPorModelo = 3; // Aumentado a 3 intentos
   let response: any;
   const errores: any[] = [];
+  const allKeys = getGeminiApiKeys();
+  let currentKeyAttempt = 0;
 
   for (const modelo of modelos) {
     let intentos = 0;
@@ -1029,25 +1017,47 @@ IMPORTANTE:
           model: modelo.id,
           contents: [{ role: 'user', parts }],
           config: {
-            temperature: 0.1,
+            temperature: 1.0, // Según docs de Gemini para mejor creatividad
             topP: 0.95,
+            topK: 40,
             maxOutputTokens: 65536,
             responseMimeType: 'application/json',
             responseJsonSchema: completeSchema,
           }
         });
         markKeySuccess(ai);
+        console.log(`✅ Respuesta exitosa con ${modelo.label}`);
         break;
       } catch (error: any) {
         intentos++;
-        errores.push(error);
-        if (isRetryableGeminiError(error)) {
-          if (error?.status === 429) {
-            markKeyFailure(ai);
+        const errorMsg = error?.message || String(error);
+        const errorCode = error?.status || error?.code || error?.error?.code;
+        errores.push({ error: errorMsg, code: errorCode, modelo: modelo.label });
+
+        console.warn(`⚠️ Error en intento ${intentos}: ${errorMsg} (código: ${errorCode})`);
+
+        // Si es error 429 (rate limit), cambiar inmediatamente a otra key
+        if (errorCode === 429 || errorMsg.includes('quota') || errorMsg.includes('RESOURCE_EXHAUSTED')) {
+          console.warn(`🔄 Error 429 detectado - cambiando a otra API key...`);
+          markKeyFailure(ai);
+
+          // Intentar con otra key si hay disponibles
+          if (currentKeyAttempt < allKeys.length - 1) {
+            currentKeyAttempt++;
+            ai = getGeminiClient(); // Obtener nueva key
+            console.log(`🔑 Cambiado a nueva API key para reintentar`);
+            await new Promise(resolve => setTimeout(resolve, 500)); // Pequeña pausa
+            continue; // Reintentar con nueva key
+          } else {
+            console.error(`❌ Todas las API keys agotadas`);
             break;
           }
+        }
+
+        if (isRetryableGeminiError(error)) {
           await new Promise(resolve => setTimeout(resolve, 1000 * intentos));
         } else {
+          console.error(`❌ Error no recuperable: ${errorMsg}`);
           break;
         }
       }
@@ -1056,11 +1066,11 @@ IMPORTANTE:
   }
 
   if (!response) {
-    throw new Error(`Fallo en Gemini tras intentos. Último error: ${errores[errores.length - 1]?.message}`);
+    const errorDetails = errores.map(e => `${e.modelo}: ${e.error} (${e.code})`).join(' | ');
+    throw new Error(`Fallo en Gemini tras ${errores.length} intentos. Errores: ${errorDetails}`);
   }
 
-  // Parsear JSON
-
+  // Parsear y validar JSON
   if (params.jobId) {
     await actualizarProgresoJob(params.jobId, 95, 'Procesando respuesta de Gemini...');
   }
@@ -1072,13 +1082,27 @@ IMPORTANTE:
     throw new Error('Respuesta JSON inválida de Gemini');
   }
 
+  // VALIDACIÓN CRÍTICA: Detectar respuestas vacías
+  const tienePalabras = Array.isArray(resultado.transcripcion?.palabras) && resultado.transcripcion.palabras.length > 0;
+  const tieneHuecos = Array.isArray(resultado.transcripcion?.analisis_huecos);
+  const tieneEstructura = Array.isArray(resultado.estructura) && resultado.estructura.length > 0;
+  const tieneTema = resultado.tema && (resultado.tema.palabras_clave?.length > 0 || resultado.tema.emocion);
+
+  // Si TODO está vacío, es una respuesta inválida
+  if (!tienePalabras && !tieneHuecos && !tieneEstructura && !tieneTema) {
+    console.error('❌ Gemini devolvió respuesta vacía - datos inválidos');
+    console.error('Respuesta recibida:', JSON.stringify(resultado, null, 2));
+    throw new Error('Gemini devolvió respuesta vacía. Reintentando...');
+  }
+
+  console.log(`📊 Validación: palabras=${tienePalabras}, huecos=${tieneHuecos}, estructura=${tieneEstructura}, tema=${tieneTema}`);
+
   // Sanitización básica
   const palabrasSanitizadas = Array.isArray(resultado.transcripcion?.palabras)
     ? resultado.transcripcion.palabras.map((p: any) => ({
       palabra: String(p.palabra),
       inicio_ms: Number(p.inicio_ms),
-      fin_ms: Number(p.fin_ms),
-      confianza: 1
+      fin_ms: Number(p.fin_ms)
     }))
     : [];
 
@@ -1087,8 +1111,7 @@ IMPORTANTE:
       inicio_ms: Number(h.inicio_ms),
       fin_ms: Number(h.fin_ms),
       tipo: h.tipo,
-      descripcion: h.descripcion,
-      confianza: 1
+      descripcion: h.descripcion
     }))
     : [];
 
@@ -1109,7 +1132,7 @@ IMPORTANTE:
     : [];
 
   const temaSanitizado = {
-    resumen: resultado.tema?.resumen || '',
+    resumen: '', // Ya no se solicita a Gemini para ahorrar tokens
     palabras_clave: resultado.tema?.palabras_clave || [],
     emocion: resultado.tema?.emocion || 'neutral'
   };

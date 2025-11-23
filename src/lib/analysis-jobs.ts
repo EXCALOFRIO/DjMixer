@@ -25,7 +25,7 @@ export interface AnalysisJob {
  */
 export async function crearJobAnalisis(hash: string): Promise<string> {
   if (!sql) throw new Error('SQL client no disponible');
-  
+
   const resultado = await sql`
     INSERT INTO analysis_jobs (
       id, hash, status, progress, created_at, updated_at
@@ -49,18 +49,31 @@ export async function crearJobAnalisis(hash: string): Promise<string> {
   return resultado[0].id;
 }
 
-/**
- * Obtiene el estado de un job
- */
 export async function obtenerEstadoJob(jobId: string): Promise<AnalysisJob | null> {
   if (!sql) throw new Error('SQL client no disponible');
-  
+
   const resultado = await sql`
     SELECT * FROM analysis_jobs 
     WHERE id = ${jobId}
     LIMIT 1
   `;
-  
+
+  return resultado.length > 0 ? resultado[0] as AnalysisJob : null;
+}
+
+/**
+ * Obtiene el último job registrado para un hash
+ */
+export async function obtenerUltimoJobPorHash(hash: string): Promise<AnalysisJob | null> {
+  if (!sql) throw new Error('SQL client no disponible');
+
+  const resultado = await sql`
+    SELECT * FROM analysis_jobs 
+    WHERE hash = ${hash}
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+
   return resultado.length > 0 ? resultado[0] as AnalysisJob : null;
 }
 
@@ -73,7 +86,7 @@ export async function actualizarProgresoJob(
   currentStep?: string
 ): Promise<void> {
   if (!sql) throw new Error('SQL client no disponible');
-  
+
   await sql`
     UPDATE analysis_jobs 
     SET 
@@ -89,7 +102,7 @@ export async function actualizarProgresoJob(
  */
 export async function marcarJobEnProceso(jobId: string): Promise<void> {
   if (!sql) throw new Error('SQL client no disponible');
-  
+
   await sql`
     UPDATE analysis_jobs 
     SET 
@@ -109,7 +122,7 @@ export async function marcarJobCompletado(
   result?: any
 ): Promise<void> {
   if (!sql) throw new Error('SQL client no disponible');
-  
+
   await sql`
     UPDATE analysis_jobs 
     SET 
@@ -131,7 +144,7 @@ export async function marcarJobFallido(
   errorMessage: string
 ): Promise<void> {
   if (!sql) throw new Error('SQL client no disponible');
-  
+
   await sql`
     UPDATE analysis_jobs 
     SET 
@@ -147,7 +160,7 @@ export async function marcarJobFallido(
  */
 export async function limpiarJobsAntiguos(): Promise<number> {
   if (!sql) throw new Error('SQL client no disponible');
-  
+
   const resultado = await sql`
     DELETE FROM analysis_jobs 
     WHERE 
@@ -155,6 +168,6 @@ export async function limpiarJobsAntiguos(): Promise<number> {
       AND updated_at < NOW() - INTERVAL '24 hours'
     RETURNING id
   `;
-  
+
   return resultado.length;
 }

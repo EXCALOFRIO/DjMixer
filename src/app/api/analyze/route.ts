@@ -8,12 +8,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { analizarAudioCompleto } from '@/lib/audio-analyzer-unified';
 import { obtenerCancionPorHash, guardarAnalisisEnDB } from '@/lib/db-persistence';
-import { 
-  crearJobAnalisis, 
-  marcarJobEnProceso, 
-  actualizarProgresoJob, 
-  marcarJobCompletado, 
-  marcarJobFallido 
+import {
+  crearJobAnalisis,
+  marcarJobEnProceso,
+  actualizarProgresoJob,
+  marcarJobCompletado,
+  marcarJobFallido
 } from '@/lib/analysis-jobs';
 import { createHash } from 'crypto';
 
@@ -58,7 +58,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   let jobId: string | null = null;
-  
+
   try {
     const formData = await request.formData();
     const file = formData.get('file') as File;
@@ -82,14 +82,38 @@ export async function POST(request: NextRequest) {
 
     const existente = await obtenerCancionPorHash(hash);
     if (existente) {
-      console.log(`   💾 Ya existe en caché\n`);
-      await marcarJobCompletado(jobId, { fromCache: true });
+      // Verificar si el análisis de Gemini está incompleto
+      // Buscamos el placeholder "Pendiente" que se inserta cuando no hay datos de Gemini
+      let geminiIncompleto = !existente.analisis_contenido ||
+        (existente.analisis_contenido as any).analisis_lirico_tematico?.tema_principal === 'Pendiente';
+
+      // Verificar también la tabla de jobs (para mayor seguridad)
+      if (!geminiIncompleto) {
+        const ultimoJob = await import('@/lib/analysis-jobs').then(m => m.obtenerUltimoJobPorHash(hash));
+        if (ultimoJob && ultimoJob.status !== 'completed') {
+          console.log(`   ⚠️ Job anterior incompleto (${ultimoJob.status} - ${ultimoJob.progress}%), forzando reprocesamiento.`);
+          geminiIncompleto = true;
+        }
+      }
+
+      console.log(`   💾 Ya existe en caché (Gemini pendiente: ${geminiIncompleto})\n`);
+
+      if (geminiIncompleto) {
+        // Si falta Gemini, NO marcamos como completado.
+        // Actualizamos progreso para indicar que Essentia está OK pero falta Gemini
+        await actualizarProgresoJob(jobId, 80, 'Recuperado de caché. Pendiente: enriquecimiento Gemini');
+      } else {
+        // Si está todo completo, cerramos el job
+        await marcarJobCompletado(jobId, { fromCache: true });
+      }
+
       return NextResponse.json({
         success: true,
         fromCache: true,
+        geminiPending: geminiIncompleto,
         hash,
         jobId,
-        cancion: existente
+        analisis: existente
       });
     }
 
@@ -98,7 +122,7 @@ export async function POST(request: NextRequest) {
     await actualizarProgresoJob(jobId, 10, 'Extrayendo audio...');
 
     const inicioAnalisis = Date.now();
-    
+
     await actualizarProgresoJob(jobId, 30, 'Analizando con Essentia...');
     // ⚡ MODO ULTRA RÁPIDO: Deshabilitar análisis lentos no críticos
     const analisisEssentia = await analizarAudioCompleto(buffer, {
@@ -109,7 +133,7 @@ export async function POST(request: NextRequest) {
       },
       fast: true          // NUEVO: Modo rápido (omite MFCC y análisis espectrales detallados)
     });
-    
+
     const tiempoAnalisis = ((Date.now() - inicioAnalisis) / 1000).toFixed(2);
 
     console.log(`   ✅ Essentia: ${tiempoAnalisis}s`);
@@ -161,11 +185,11 @@ export async function POST(request: NextRequest) {
 
   } catch (error: any) {
     console.error('❌ Error en análisis:', error);
-    
+
     if (jobId) {
       await marcarJobFallido(jobId, error.message || 'Error desconocido');
     }
-    
+
     return NextResponse.json(
       { error: error.message || 'Error en análisis', jobId },
       { status: 500 }
