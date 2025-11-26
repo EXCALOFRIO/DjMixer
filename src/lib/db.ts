@@ -5,11 +5,11 @@ function getSqlClient() {
   if (typeof window !== 'undefined') {
     throw new Error('La base de datos solo puede ser accedida desde el servidor');
   }
-  
+
   if (!process.env.DATABASE_URL) {
     throw new Error('DATABASE_URL no está definida en las variables de entorno');
   }
-  
+
   return neon(process.env.DATABASE_URL);
 }
 
@@ -24,6 +24,19 @@ export type HuecoInstrumental = {
   inicio_ms: number;
   fin_ms: number;
   tipo: 'instrumental_puro' | 'voz_principal_residuo';
+};
+
+export type BloqueVocal = {
+  tipo: 'bloque_verso' | 'bloque_coro' | 'adlib';
+  inicio_ms: number;
+  fin_ms: number;
+};
+
+export type LoopTransicion = {
+  texto: string;
+  inicio_ms: number;
+  fin_ms: number;
+  score: number; // 1-10, idoneidad para loop
 };
 
 export type CancionAnalizada = {
@@ -44,7 +57,8 @@ export type CancionAnalizada = {
   cue_points: CuePoint[] | null;
   mix_in_point: number | null;
   mix_out_point: number | null;
-  letras_ts: TranscripcionPalabra[] | null;
+  vocales_clave: BloqueVocal[] | null;
+  loops_transicion: LoopTransicion[] | null;
   estructura_ts: EstructuraMusical[] | null;
   analisis_contenido: AnalisisContenido | null;
   presencia_vocal_ts: PresenciaVocal[] | null;

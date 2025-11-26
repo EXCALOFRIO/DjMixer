@@ -30,11 +30,12 @@ CREATE TABLE IF NOT EXISTS canciones_analizadas (
     frases_ts_ms JSONB NOT NULL DEFAULT '[]',
     
     -- ===================================================================
-    -- DATOS DE GEMINI (LETRAS Y ESTRUCTURA)
+    -- DATOS DE GEMINI (ESTRUCTURA DJ-CENTRIC)
     -- ===================================================================
-    letras_ts JSONB NOT NULL DEFAULT '[]',
+    vocales_clave JSONB NOT NULL DEFAULT '[]',
+    loops_transicion JSONB NOT NULL DEFAULT '[]',
     estructura_ts JSONB NOT NULL DEFAULT '[]',
-    analisis_contenido JSONB NOT NULL DEFAULT '{"tema": {"resumen": "", "palabras_clave": [], "emocion": "neutral"}, "eventos_dj": []}',
+    analisis_contenido JSONB NOT NULL DEFAULT '{"tema_keywords": [], "emocion": "neutral", "eventos_dj": []}',
     
     -- ===================================================================
     -- DATOS TÉCNICOS (VAD + RMS)

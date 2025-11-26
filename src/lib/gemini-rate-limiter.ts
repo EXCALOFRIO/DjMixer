@@ -1,4 +1,4 @@
-import { analizarConGeminiOptimizado } from './gemini-optimizer';
+import { analizarConGeminiDJ as analizarConGeminiOptimizado } from './gemini-optimizer';
 import type { AnalisisCompleto } from './audio-analyzer-unified';
 import {
   getGeminiApiKeys,
@@ -120,7 +120,6 @@ class GeminiRateLimiterImpl implements GeminiRateLimiter {
     analizarConGeminiOptimizado({
       fileMimeType: 'audio/mpeg',
       segmentosVoz,
-      perfilEnergiaRMS: [],
       nombreCancion: hash,
       analisisTecnico: {
         bpm: analisisTecnico.bpm,
@@ -133,10 +132,7 @@ class GeminiRateLimiterImpl implements GeminiRateLimiter {
         duracion_ms: analisisTecnico.duracion_ms,
         downbeats_ts_ms: analisisTecnico.downbeats_ts_ms,
         beats_ts_ms: analisisTecnico.beats_ts_ms,
-        frases_ts_ms: analisisTecnico.frases_ts_ms,
-        ritmoAvanzado: {
-          beats_loudness: analisisTecnico.ritmo_avanzado?.beats_loudness || [],
-        },
+        frases_ts_ms: analisisTecnico.frases_ts_ms
       },
       hash_archivo: hash,
       titulo: filePathOrUri || hash,

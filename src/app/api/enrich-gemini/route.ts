@@ -1,13 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { obtenerCancionPorHash, actualizarDatosGemini } from '@/lib/db-persistence';
-import { analizarConGeminiOptimizado } from '@/lib/gemini-optimizer';
-import type { CancionAnalizada, TranscripcionPalabra, EstructuraMusical, AnalisisContenido } from '@/lib/db';
+import { analizarConGeminiDJ } from '@/lib/gemini-optimizer';
+import type { CancionAnalizada, EstructuraMusical, AnalisisContenido, BloqueVocal, LoopTransicion } from '@/lib/db';
 import { GoogleGenAI } from '@google/genai';
-import { getGeminiApiKeys } from '@/lib/gemini-keys';
 import { createHash } from 'crypto';
 import { writeFile, unlink, mkdir, readFile } from 'fs/promises';
 import { join, extname } from 'path';
-import { tmpdir } from 'os';
 import { marcarJobCompletado, actualizarProgresoJob } from '@/lib/analysis-jobs';
 
 // --- DEFINICIONES Y CONSTANTES ---
@@ -56,45 +54,13 @@ interface CachedAudio {
   mimeType: string;
 }
 
+// Nueva respuesta DJ-Centric
 interface GeminiEnriquecidoResponse {
-  // Transcripción completa palabra por palabra
-  transcripcion: {
-    palabras: Array<{
-      palabra: string;
-      inicio_ms: number;
-      fin_ms: number;
-    }>;
-  };
-
-  // Análisis de huecos instrumentales
-  huecos: Array<{
-    inicio_ms: number;
-    fin_ms: number;
-    tipo: 'instrumental_puro' | 'coros_melodicos' | 'adlibs_fx' | 'voz_principal_residuo';
-    descripcion?: string;
-    energia_relativa?: number;
-  }>;
-
-  // Estructura musical refinada
-  estructura: Array<{
-    seccion: 'intro' | 'verso' | 'estribillo' | 'puente' | 'instrumental' | 'outro' | 'build_up';
-    inicio_ms: number;
-    fin_ms: number;
-  }>;
-
-  // Tema y contenido lírico
-  tema: {
-    resumen: string;
-    palabras_clave: string[];
-    emocion: string;
-  };
-
-  // Eventos clave para DJ
-  eventos_dj: Array<{
-    tipo: 'drop' | 'break' | 'build_up' | 'cambio_ritmo' | 'hook';
-    tiempo_ms: number;
-    descripcion?: string;
-  }>;
+  vocales_clave: BloqueVocal[];
+  loops_transicion: LoopTransicion[];
+  estructura: EstructuraMusical[];
+  analisis_contenido: AnalisisContenido;
+  huecos: any[]; // AnalisisHuecoInstrumental
 }
 
 // --- FUNCIONES AUXILIARES ---
@@ -306,13 +272,11 @@ async function resolveAudioPayload(request: NextRequest): Promise<{ buffer: Buff
 
 export async function POST(request: NextRequest) {
   let tempFilePath: string | null = null;
-  let uploadedFileName: string | null = null;
-  let ai: GoogleGenAI | null = null;
 
   try {
     const { buffer, hash, fileName, mimeType, source } = await resolveAudioPayload(request);
 
-    console.log(`🎵 Enriqueciendo canción con Gemini: ${hash}`);
+    console.log(`🎵 Enriqueciendo canción con Gemini (DJ-Centric): ${hash}`);
     console.log(`📂 Archivo: ${fileName} (${mimeType}) | origen: ${source}`);
 
     const cancion = await obtenerCancionPorHash(hash);
@@ -324,15 +288,6 @@ export async function POST(request: NextRequest) {
       await cacheAudioBuffer({ hash, buffer, fileName, mimeType });
     }
 
-    // ✅ SOLUCIÓN ERROR 403: Usar buffer inline en lugar de subir archivo
-    // Esto permite que cada API key procese el audio sin problemas de permisos
-    console.log('🎯 Usando fileBuffer inline para evitar errores 403 al rotar API keys');
-    console.log(`   - Tamaño buffer: ${buffer.length} bytes`);
-    console.log(`   - MIME type: ${mimeType}`);
-    console.log(`   - Rotación automática de keys habilitada`);
-
-    // NO subimos archivo a Gemini Files API para evitar problemas de permisos entre keys
-
     type CancionExtendida = CancionAnalizada & {
       segmentos_voz?: Array<{ start_ms: number; end_ms: number }>;
     };
@@ -342,18 +297,15 @@ export async function POST(request: NextRequest) {
       ? cancionExtendida.segmentos_voz
       : [];
 
-    console.log('🎯 Llamando a analizarConGeminiOptimizado con buffer inline:');
+    console.log('🎯 Llamando a analizarConGeminiDJ con buffer inline:');
     console.log(`   - fileBuffer size: ${buffer.length} bytes`);
-    console.log(`   - fileMimeType: ${mimeType}`);
     console.log(`   - segmentosVoz: ${segmentosVoz.length}`);
-    console.log(`   - Rotación automática: ACTIVADA`);
 
-    const analisisCompleto = await analizarConGeminiOptimizado({
+    const analisisCompleto = await analizarConGeminiDJ({
       hash_archivo: hash,
       titulo: cancion.titulo || 'Desconocido',
-      fileBuffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer, // ✅ Cast explícito para TS
+      fileBuffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer,
       fileMimeType: mimeType,
-      // NO apiKeyOverride - permite rotación automática
       jobId: hash,
       analisisTecnico: {
         bpm: cancion.bpm || 120,
@@ -372,141 +324,46 @@ export async function POST(request: NextRequest) {
       nombreCancion: cancion.titulo || 'Desconocido',
     });
 
-    const palabras = Array.isArray(analisisCompleto.palabras) ? analisisCompleto.palabras : [];
-
-    // 🔒 VALIDACIÓN EXHAUSTIVA de la respuesta de Gemini
-    const camposFaltantes: string[] = [];
-    
-    if (!analisisCompleto.estructura || !Array.isArray(analisisCompleto.estructura) || analisisCompleto.estructura.length === 0) {
-      camposFaltantes.push('estructura (vacía o no es array)');
-    }
-    if (!analisisCompleto.huecos_analizados || !Array.isArray(analisisCompleto.huecos_analizados)) {
-      camposFaltantes.push('huecos_analizados (no es array)');
-    }
-    if (!analisisCompleto.tema || typeof analisisCompleto.tema !== 'object') {
-      camposFaltantes.push('tema (no existe o no es objeto)');
-    } else {
-      if (!Array.isArray(analisisCompleto.tema.palabras_clave)) {
-        camposFaltantes.push('tema.palabras_clave (no es array)');
-      }
-      if (!analisisCompleto.tema.emocion) {
-        camposFaltantes.push('tema.emocion (vacío)');
-      }
-    }
-    if (!analisisCompleto.eventos_dj || !Array.isArray(analisisCompleto.eventos_dj)) {
-      camposFaltantes.push('eventos_dj (no es array)');
-    }
-
-    // ❌ Si falta algún campo obligatorio, rechazar y lanzar error para reintentar
-    if (camposFaltantes.length > 0) {
-      console.error('❌ Gemini devolvió datos INCOMPLETOS:', camposFaltantes.join(', '));
-      console.error('   Respuesta recibida:', JSON.stringify(analisisCompleto, null, 2));
-      throw new ClientFacingError(
-        `Gemini devolvió respuesta incompleta. Faltan: ${camposFaltantes.join(', ')}`,
-        422
-      );
-    }
-
-    const respuesta: GeminiEnriquecidoResponse = {
-      transcripcion: {
-        palabras: palabras.map(p => ({
-          palabra: p.palabra,
-          inicio_ms: p.inicio_ms,
-          fin_ms: p.fin_ms
-        })),
-      },
-      huecos: analisisCompleto.huecos_analizados || [],
-      estructura: analisisCompleto.estructura || [],
-      tema: analisisCompleto.tema || { resumen: '', palabras_clave: [], emocion: 'neutral' },
-      eventos_dj: analisisCompleto.eventos_dj || [],
-    };
-
-    console.log(`✅ Enriquecimiento completo: ${respuesta.transcripcion.palabras.length} palabras, ${respuesta.estructura.length} secciones`);
-
     // 💾 PERSISTIR RESULTADOS EN BASE DE DATOS
     try {
       console.log('💾 Guardando enriquecimiento Gemini en base de datos...');
 
       await actualizarProgresoJob(hash, 90, 'Guardando enriquecimiento Gemini en BD...');
 
-      // Convertir a tipos de BD
-      const letras_ts: TranscripcionPalabra[] = respuesta.transcripcion.palabras.map(p => ({
-        palabra: p.palabra,
-        inicio_ms: p.inicio_ms,
-        fin_ms: p.fin_ms,
-      }));
-
-      // Mapear estructura de Gemini a tipo de BD
-      const mapSeccion = (seccion: string): 'intro' | 'verso' | 'estribillo' | 'puente' | 'solo_instrumental' | 'outro' | 'silencio' | 'subidon_build_up' => {
-        switch (seccion) {
-          case 'intro': return 'intro';
-          case 'verso': return 'verso';
-          case 'estribillo': return 'estribillo';
-          case 'puente': return 'puente';
-          case 'instrumental': return 'solo_instrumental';
-          case 'outro': return 'outro';
-          case 'build_up': return 'subidon_build_up';
-          default: return 'verso'; // fallback
-        }
-      };
-
-      const estructura_ts: EstructuraMusical[] = respuesta.estructura.map(e => ({
-        tipo_seccion: mapSeccion(e.seccion),
-        inicio_ms: e.inicio_ms,
-        fin_ms: e.fin_ms,
-      }));
-
-      // Mapear eventos DJ de Gemini a tipo de BD
-      const mapEvento = (tipo: string): 'caida_de_bajo' | 'acapella_break' | 'cambio_ritmico_notable' | 'melodia_iconica' => {
-        switch (tipo) {
-          case 'drop': return 'caida_de_bajo';
-          case 'break': return 'acapella_break';
-          case 'cambio_ritmico_notable': return 'cambio_ritmico_notable';
-          case 'hook': return 'melodia_iconica';
-          case 'build_up': return 'caida_de_bajo'; // build_up seguido de drop
-          default: return 'cambio_ritmico_notable'; // fallback
-        }
-      };
-
-      const eventos_clave_dj = respuesta.eventos_dj.map(e => ({
-        evento: mapEvento(e.tipo),
-        inicio_ms: e.tiempo_ms,
-        fin_ms: e.tiempo_ms + 1000, // evento puntual, asignar 1s de duración
-      }));
-
-      const analisis_contenido: AnalisisContenido = {
-        analisis_lirico_tematico: {
-          tema_principal: respuesta.tema.resumen,
-          palabras_clave_semanticas: respuesta.tema.palabras_clave,
-          evolucion_emocional: respuesta.tema.emocion,
-        },
-        eventos_clave_dj,
-      };
-
       await actualizarDatosGemini({
         hash,
-        letras_ts,
-        estructura_ts,
-        analisis_contenido,
-        huecos_analizados: respuesta.huecos,
+        vocales_clave: analisisCompleto.vocales_clave || undefined,
+        loops_transicion: analisisCompleto.loops_transicion || undefined,
+        estructura_ts: analisisCompleto.estructura_ts || undefined,
+        analisis_contenido: analisisCompleto.analisis_contenido || undefined,
+        huecos_analizados: analisisCompleto.huecos_analizados || undefined,
       });
 
       console.log('✅ Enriquecimiento guardado en BD exitosamente');
 
-      // Marcar job como 100% completado (Essentia + Gemini)
+      // Marcar job como 100% completado
       await marcarJobCompletado(hash, {
         gemini_completed: true,
-        palabras: respuesta.transcripcion.palabras.length,
-        secciones: respuesta.estructura.length,
-        huecos: respuesta.huecos.length,
+        vocales: (analisisCompleto.vocales_clave || []).length,
+        secciones: (analisisCompleto.estructura_ts || []).length,
+        loops: (analisisCompleto.loops_transicion || []).length,
       });
 
       console.log('✅ Job marcado como 100% completado');
     } catch (dbError) {
       console.error('❌ Error guardando en BD:', dbError);
-      // Continuar y devolver respuesta aunque falle el guardado
-      // El frontend puede reintentar con /api/enrich-gemini
     }
+
+    const respuesta: GeminiEnriquecidoResponse = {
+      vocales_clave: analisisCompleto.vocales_clave || [],
+      loops_transicion: analisisCompleto.loops_transicion || [],
+      estructura: analisisCompleto.estructura_ts || [],
+      analisis_contenido: analisisCompleto.analisis_contenido || {
+        analisis_lirico_tematico: { tema_principal: '', palabras_clave_semanticas: [], evolucion_emocional: 'neutral' },
+        eventos_clave_dj: []
+      },
+      huecos: analisisCompleto.huecos_analizados || [],
+    };
 
     return NextResponse.json({ success: true, hash, gemini: respuesta });
   } catch (error: any) {
@@ -524,10 +381,9 @@ export async function POST(request: NextRequest) {
     try {
       if (tempFilePath) {
         await unlink(tempFilePath);
-        console.log('🗑️  Archivo temporal eliminado (cleanup)');
       }
     } catch (cleanupError) {
-      console.warn('⚠️  Error en limpieza:', cleanupError);
+      // Ignore
     }
 
     return NextResponse.json({ success: false, error: message }, { status });

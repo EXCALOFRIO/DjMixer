@@ -1,863 +1,180 @@
-import { actualizarProgresoJob } from './analysis-jobs';
 /**
- * Optimizador de peticiones a Gemini
- * UNA SOLA PETICIÓN para transcripción + análisis completo
+ * DJ-CENTRIC GEMINI OPTIMIZER
+ * Optimized for speed and DJ-specific analysis
+ * NO word-by-word transcription - focuses on structure, vocal blocks, and loops
  */
 
 import { GoogleGenAI } from '@google/genai';
+import { actualizarProgresoJob } from './analysis-jobs';
+import { getGeminiApiKeys } from './gemini-keys';
 import type {
   AnalisisContenido,
   EstructuraMusical,
   EventoClaveDJ,
-  TranscripcionPalabra,
+  BloqueVocal,
+  LoopTransicion,
+  CancionAnalizada,
+  SegmentoVoz,
 } from './db';
-import { getGeminiApiKeys } from './gemini-keys';
 
-// ============================================
-// FUNCIONES DE CONVERSIÓN DE TIEMPO (SOLUCIÓN HÍBRIDA)
-// ============================================
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
 
-/**
- * Convierte milisegundos a formato MM:SS para el Prompt (legibilidad humana)
- * Ej: 65000 -> "01:05"
- */
-function msToMinSec(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return '00:00';
+/** Convierte ms a MM:SS para el prompt (Gemini entiende mejor este formato) */
+function formatTimeForPrompt(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+/** Convierte ms a segundos con 2 decimales (1500ms -> 1.5s) */
+function msToSec(ms: number): number {
+  return Math.round(ms / 10) / 100;
+}
+
+/** Convierte segundos a ms enteros (1.5s -> 1500ms) */
+function secToMs(sec: number): number {
+  return Math.round(sec * 1000);
 }
 
 /**
- * Crea una cadena formateada para el Prompt que incluye ambos formatos.
- * Esto ayuda a Gemini a no "perderse" con números grandes.
- * Ej: 65432 -> "65432ms (01:05)"
+ * GROUND TRUTH VALIDATION
+ * Valida si un intervalo temporal tiene voz real según el VAD
+ * Esto previene alucinaciones de Gemini marcando versos donde no hay voz
  */
-function formatTimeContext(ms: number): string {
-  return `${Math.round(ms)}ms (${msToMinSec(ms)})`;
+function validarPresenciaVocal(inicio: number, fin: number, vad: SegmentoVoz[]): boolean {
+  // Margen de error de 1 segundo
+  const margen = 1000;
+  // Buscamos si hay algún solapamiento significativo
+  return vad.some(v =>
+    (inicio < v.end_ms + margen) && (fin > v.start_ms - margen)
+  );
 }
 
-/**
- * Formatea un rango de tiempo para el Prompt
- * Ej: [60000, 75000] -> "[60000-75000ms] (de 01:00 a 01:15)"
- */
-function formatRangeContext(start: number, end: number): string {
-  return `[${Math.round(start)}-${Math.round(end)}ms] (de ${msToMinSec(start)} a ${msToMinSec(end)})`;
-}
-
-const SECCION_MAP: Record<string, EstructuraMusical['tipo_seccion']> = {
-  intro: 'intro',
-  verso: 'verso',
-  estribillo: 'estribillo',
-  puente: 'puente',
-  instrumental: 'solo_instrumental',
-  outro: 'outro',
-  build_up: 'subidon_build_up',
-};
-
-const EVENTO_DJ_MAP: Record<string, EventoClaveDJ['evento']> = {
-  drop: 'caida_de_bajo',
-  break: 'acapella_break',
-  build_up: 'cambio_ritmico_notable',
-  cambio_ritmo: 'cambio_ritmico_notable',
-  hook: 'melodia_iconica',
-};
-
+/** Mapea sección de Gemini a tipo interno */
 function mapSeccionToTipo(seccion: string): EstructuraMusical['tipo_seccion'] {
-  return SECCION_MAP[seccion] || 'verso';
+  const map: Record<string, EstructuraMusical['tipo_seccion']> = {
+    'intro': 'intro',
+    'verso': 'verso',
+    'estribillo': 'estribillo',
+    'puente': 'puente',
+    'instrumental': 'solo_instrumental',
+    'outro': 'outro',
+    'build_up': 'subidon_build_up',
+    'drop': 'subidon_build_up'
+  };
+  return map[seccion.toLowerCase()] || 'verso';
 }
 
+/** Mapea evento DJ de Gemini a tipo interno */
 function mapEventoDJ(tipo: string): EventoClaveDJ['evento'] | null {
-  return EVENTO_DJ_MAP[tipo] || null;
+  const map: Record<string, EventoClaveDJ['evento']> = {
+    'drop': 'caida_de_bajo',
+    'break': 'acapella_break',
+    'build_up': 'cambio_ritmico_notable',
+    'cambio_ritmo': 'cambio_ritmico_notable',
+    'hook': 'melodia_iconica'
+  };
+  return map[tipo.toLowerCase()] || null;
 }
 
-const RMS_SAMPLE_WINDOW_MS = 250;
-
-function pickExtremePositions(values: number[], count: number, order: 'max' | 'min'): number[] {
-  if (!values.length || count <= 0) return [];
-  return values
-    .map((value, idx) => ({ value, idx }))
-    .sort((a, b) => (order === 'max' ? b.value - a.value : a.value - b.value))
-    .slice(0, count)
-    .map(({ idx }) => idx * RMS_SAMPLE_WINDOW_MS);
+/** Verifica si un error de Gemini es reintentable */
+function isRetryableError(error: any): boolean {
+  const code = error?.status || error?.code || error?.error?.code;
+  return [429, 500, 503, 504].includes(Number(code));
 }
 
-function pickBeatPositions(
-  beatsLoudness: number[],
-  beatsTimeline: number[],
-  count: number
-): number[] {
-  if (!beatsLoudness.length || !beatsTimeline.length || count <= 0) return [];
-  return beatsLoudness
-    .map((value, idx) => ({ value, tiempo: beatsTimeline[idx] ?? beatsTimeline[beatsTimeline.length - 1] }))
-    .sort((a, b) => b.value - a.value)
-    .slice(0, count)
-    .map(({ tiempo }) => Math.round(tiempo));
-}
+// ============================================================================
+// GEMINI CLIENT MANAGEMENT
+// ============================================================================
 
 const geminiClientCache = new Map<string, GoogleGenAI>();
-let currentKeyIndex = 0;
-let keyFailureCount = new Map<string, number>();
 
 function getGeminiClient(apiKeyOverride?: string): GoogleGenAI {
-  if (apiKeyOverride) {
-    if (!geminiClientCache.has(apiKeyOverride)) {
-      geminiClientCache.set(apiKeyOverride, new GoogleGenAI({ apiKey: apiKeyOverride }));
-    }
-    return geminiClientCache.get(apiKeyOverride)!;
+  const keys = getGeminiApiKeys();
+  const key = apiKeyOverride || keys[Math.floor(Math.random() * keys.length)];
+
+  if (!key) throw new Error('No Gemini API keys found');
+
+  if (!geminiClientCache.has(key)) {
+    geminiClientCache.set(key, new GoogleGenAI({ apiKey: key }));
   }
 
-  const allKeys = getGeminiApiKeys();
-  if (allKeys.length === 0) {
-    throw new Error('No hay API keys de Gemini configuradas');
-  }
-
-  // Rotar entre keys disponibles (round-robin con skip de keys fallidas)
-  let attempts = 0;
-  while (attempts < allKeys.length) {
-    currentKeyIndex = (currentKeyIndex + 1) % allKeys.length;
-    const selectedKey = allKeys[currentKeyIndex];
-    const failures = keyFailureCount.get(selectedKey) || 0;
-
-    // Skip keys que han fallado más de 3 veces consecutivas
-    if (failures < 3) {
-      if (!geminiClientCache.has(selectedKey)) {
-        geminiClientCache.set(selectedKey, new GoogleGenAI({ apiKey: selectedKey }));
-      }
-      console.log(`🔑 Usando API key #${currentKeyIndex + 1}/${allKeys.length} (${failures} fallos previos)`);
-      return geminiClientCache.get(selectedKey)!;
-    }
-    attempts++;
-  }
-
-  // Si todas las keys están marcadas como fallidas, resetear contadores e intentar de nuevo
-  console.warn('⚠️ Todas las API keys han fallado. Reseteando contadores...');
-  keyFailureCount.clear();
-  currentKeyIndex = 0;
-  const firstKey = allKeys[0];
-  if (!geminiClientCache.has(firstKey)) {
-    geminiClientCache.set(firstKey, new GoogleGenAI({ apiKey: firstKey }));
-  }
-  return geminiClientCache.get(firstKey)!;
+  return geminiClientCache.get(key)!;
 }
 
-function markKeyFailure(client: GoogleGenAI): void {
-  // Encontrar qué key usó este client
-  for (const [key, cachedClient] of geminiClientCache.entries()) {
-    if (cachedClient === client) {
-      const failures = (keyFailureCount.get(key) || 0) + 1;
-      keyFailureCount.set(key, failures);
-      console.warn(`⚠️ Key marcada con ${failures} fallos`);
-      break;
-    }
-  }
-}
-
-function markKeySuccess(client: GoogleGenAI): void {
-  // Resetear contador de fallos para esta key
-  for (const [key, cachedClient] of geminiClientCache.entries()) {
-    if (cachedClient === client) {
-      keyFailureCount.set(key, 0);
-      break;
-    }
-  }
-}
-
-const RETRYABLE_GEMINI_CODES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
-const RETRYABLE_GEMINI_LABELS = new Set([
-  'unavailable',
-  'resource_exhausted',
-  'deadline_exceeded',
-  'aborted',
-]);
-
-function isRetryableGeminiError(error: any): boolean {
-  if (!error) return false;
-  const status = Number(error?.status ?? error?.code ?? error?.error?.code);
-  const statusLabel = String(error?.error?.status ?? '').toLowerCase();
-  const message = String(error?.message ?? '').toLowerCase();
-  const errorString = String(error).toLowerCase();
-
-  if (RETRYABLE_GEMINI_CODES.has(status)) return true;
-  if (statusLabel && RETRYABLE_GEMINI_LABELS.has(statusLabel)) return true;
-
-  return [
-    'overloaded',
-    'temporarily unavailable',
-    'quota',
-    'try again later',
-    'fetch failed',
-    'etimedout',
-    'network',
-    'econnreset',
-    'deadline',
-  ].some(keyword => message.includes(keyword) || errorString.includes(keyword));
-}
-
-export interface FileUploadResult {
-  name: string;
-  uri: string;
-  mimeType: string;
-  sizeBytes: number;
-}
-
-/**
- * 1. POLLING INTELIGENTE - Espera activa del procesamiento del archivo
- * En lugar de espera fija, consulta el estado hasta que esté listo
- */
-export async function esperarProcesamientoArchivo(
-  fileName: string,
-  options: {
-    maxWaitTimeMs?: number;
-    pollIntervalMs?: number;
-  } = {}
-): Promise<void> {
-  const ai = getGeminiClient();
-  const {
-    maxWaitTimeMs = 120000, // 2 minutos máximo
-    pollIntervalMs = 5000,   // Consultar cada 5 segundos
-  } = options;
-
-  console.log('⏳ Esperando a que Gemini procese el archivo...');
-
-  let fileState = await ai.files.get({ name: fileName });
-  let waitedTimeMs = 0;
-
-  while (fileState.state === 'PROCESSING' && waitedTimeMs < maxWaitTimeMs) {
-    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-    waitedTimeMs += pollIntervalMs;
-    console.log(`   ...esperando (${waitedTimeMs / 1000}s) - Estado: ${fileState.state}`);
-    fileState = await ai.files.get({ name: fileName });
-  }
-
-  if (fileState.state !== 'ACTIVE') {
-    throw new Error(
-      `El archivo ${fileName} no pudo ser procesado a tiempo. ` +
-      `Estado final: ${fileState.state}. Tiempo de espera: ${waitedTimeMs}ms`
-    );
-  }
-
-  console.log(`✅ Archivo procesado y ACTIVO (${waitedTimeMs / 1000}s)`);
-}
-
-/**
- * ESTRUCTURA DE DATOS UNIFICADA
- * Consolida toda la información de análisis en un solo objeto
- */
-export interface CancionAnalizada {
-  // Identificación
-  id?: string;
-  hash_archivo: string;
-  titulo: string;
-
-  // Métricas básicas
-  bpm: number;
-  tonalidad_camelot: string;
-  tonalidad_compatible: string[];
-  energia: number;
-  bailabilidad: number;
-  animo_general: string;
-  compas: { numerador: number; denominador: number };
-  duracion_ms: number;
-
-  // Timing y estructura
-  beats_ts_ms: number[];
-  downbeats_ts_ms: number[];
-  frases_ts_ms: number[];
-
-  // Transcripción palabra por palabra
-  palabras: Array<{
-    palabra: string;
-    inicio_ms: number;
-    fin_ms: number;
-  }>;
-
-  // Análisis de huecos instrumentales
-  huecos_analizados: AnalisisHuecoInstrumental[];
-
-  // Estructura musical
-  estructura: Array<{
-    seccion: 'intro' | 'verso' | 'estribillo' | 'puente' | 'instrumental' | 'outro' | 'build_up';
-    inicio_ms: number;
-    fin_ms: number;
-  }>;
-
-  // Tema y contenido
-  tema: {
-    resumen: string;
-    palabras_clave: string[];
-    emocion: 'alegre' | 'triste' | 'energético' | 'romántico' | 'melancólico' | 'festivo' | 'reflexivo';
-  };
-
-  // Eventos para DJ
-  eventos_dj: Array<{
-    tipo: 'drop' | 'break' | 'build_up' | 'cambio_ritmo' | 'hook';
-    tiempo_ms: number;
-    descripcion?: string;
-  }>;
-
-  // Datos técnicos (VAD + RMS)
-  segmentos_voz: Array<{ start_ms: number; end_ms: number }>;
-  perfil_energia_rms: number[];
-
-  // Datos persistentes requeridos por la BD
-  letras_ts?: TranscripcionPalabra[];
-  estructura_ts?: EstructuraMusical[];
-  analisis_contenido?: AnalisisContenido;
-
-  // Metadatos
-  fecha_procesado?: Date;
-}
-
-/**
- * 2. DIVISIÓN EN DOS PASOS
- * Paso 1: Solo transcripción (audio → texto) - LA PARTE LENTA
- */
-export interface AnalisisHuecoInstrumental {
-  inicio_ms: number;
-  fin_ms: number;
-  tipo: 'instrumental_puro' | 'coros_melodicos' | 'adlibs_fx' | 'voz_principal_residuo';
-  descripcion?: string;
-  energia_relativa?: number; // 1-10
-}
-
-export interface TranscripcionSchema {
-  palabras: Array<{
-    palabra: string;
-    inicio_ms: number;
-    fin_ms: number;
-  }>;
-  analisis_huecos?: AnalisisHuecoInstrumental[];
-}
-
-/**
- * @deprecated Esta función ha sido reemplazada por `analizarConGeminiOptimizado`
- * que hace todo en una sola petición (transcripción + análisis estructural).
- * Se mantiene por compatibilidad pero NO se recomienda su uso.
- */
-export async function transcribirAudio(
-  fileUri: string,
-  fileMimeType: string,
-  duracionMs: number,
-  segmentosVoz: Array<{ start_ms: number; end_ms: number }>,
-  perfilEnergiaRMS: number[],
-  nombreCancion?: string
-): Promise<TranscripcionSchema> {
-  console.log('🎤 PASO 1: Transcribiendo audio PALABRA POR PALABRA con segmentos VAD precisos y verificación de huecos...');
-  if (nombreCancion) {
-    console.log(`📀 Canción: ${nombreCancion}`);
-  }
-  console.log(`⏱️  Duración: ${duracionMs}ms (${Math.floor(duracionMs / 1000)}s)`);
-
-  const duracionSegundos = Math.floor(duracionMs / 1000);
-  const segmentosFormateados = segmentosVoz.map(s => `[${s.start_ms}, ${s.end_ms}]`).join(', ');
-
-  console.log('\n🎯 SEGMENTOS VAD DETECTADOS:');
-  segmentosVoz.forEach((seg, idx) => {
-    const duracionSeg = seg.end_ms - seg.start_ms;
-    console.log(`   Segmento ${idx + 1}: ${seg.start_ms}ms → ${seg.end_ms}ms (${duracionSeg}ms)`);
-  });
-
-  // Calcular huecos instrumentales (espacios entre segmentos VAD)
-  const huecosInstrumentales: Array<{ inicio_ms: number; fin_ms: number }> = [];
-
-  // Hueco antes del primer segmento
-  if (segmentosVoz.length > 0 && segmentosVoz[0].start_ms > 0) {
-    huecosInstrumentales.push({ inicio_ms: 0, fin_ms: segmentosVoz[0].start_ms });
-  }
-
-  // Huecos entre segmentos
-  for (let i = 0; i < segmentosVoz.length - 1; i++) {
-    const finActual = segmentosVoz[i].end_ms;
-    const inicioSiguiente = segmentosVoz[i + 1].start_ms;
-    if (inicioSiguiente > finActual) {
-      huecosInstrumentales.push({ inicio_ms: finActual, fin_ms: inicioSiguiente });
-    }
-  }
-
-  // Hueco después del último segmento
-  if (segmentosVoz.length > 0 && segmentosVoz[segmentosVoz.length - 1].end_ms < duracionMs) {
-    huecosInstrumentales.push({
-      inicio_ms: segmentosVoz[segmentosVoz.length - 1].end_ms,
-      fin_ms: duracionMs
-    });
-  }
-
-  const huecosFormateados = huecosInstrumentales.map(h => `[${h.inicio_ms}, ${h.fin_ms}]`).join(', ');
-
-  console.log('\n🔍 HUECOS INSTRUMENTALES CALCULADOS:');
-  if (huecosInstrumentales.length === 0) {
-    console.log('   (No hay huecos - audio continuo)');
-  } else {
-    huecosInstrumentales.forEach((hueco, idx) => {
-      const duracionHueco = hueco.fin_ms - hueco.inicio_ms;
-      console.log(`   Hueco ${idx + 1}: ${hueco.inicio_ms}ms → ${hueco.fin_ms}ms (${duracionHueco}ms)`);
-    });
-  }
-
-  console.log(`\n📊 PERFIL DE ENERGÍA RMS (${perfilEnergiaRMS.length} muestras):`);
-  const rmsResumen = perfilEnergiaRMS.slice(0, 10).map(v => v.toFixed(2)).join(', ');
-  console.log(`   Primeras 10 muestras: [${rmsResumen}, ...]`);
-  const rmsPromedio = (perfilEnergiaRMS.reduce((a, b) => a + b, 0) / perfilEnergiaRMS.length).toFixed(2);
-  const rmsMax = Math.max(...perfilEnergiaRMS).toFixed(2);
-  console.log(`   Promedio: ${rmsPromedio}, Máximo: ${rmsMax}`);
-
-  const transcriptionSchema = {
-    type: 'object',
-    properties: {
-      palabras: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            palabra: { type: 'string', description: 'Palabra individual' },
-            inicio_ms: { type: 'number', description: 'Timestamp exacto de inicio (debe estar dentro de un segmento VAD)' },
-            fin_ms: { type: 'number', description: 'Timestamp exacto de fin (debe estar dentro de un segmento VAD)' },
-          },
-          required: ['palabra', 'inicio_ms', 'fin_ms']
-        }
-      },
-      analisis_huecos: {
-        type: 'array',
-        description: 'Análisis de los huecos entre segmentos de voz',
-        items: {
-          type: 'object',
-          properties: {
-            inicio_ms: { type: 'number', description: 'Inicio del hueco instrumental' },
-            fin_ms: { type: 'number', description: 'Fin del hueco instrumental' },
-            tipo: {
-              type: 'string',
-              enum: ['instrumental_puro', 'coros_melodicos', 'adlibs_fx', 'voz_principal_residuo'],
-              description: 'Clasificación del contenido del hueco'
-            },
-            descripcion: {
-              type: 'string',
-              description: 'Descripción del contenido (obligatorio si no es instrumental_puro)'
-            }
-          },
-          required: ['inicio_ms', 'fin_ms', 'tipo']
-        }
-      }
-    },
-    required: ['palabras', 'analisis_huecos']
-  };
-
-  const perfilRmsFormateado = `[${perfilEnergiaRMS.map(v => v.toFixed(2)).join(', ')}]`;
-
-  const prompt = `Transcribe palabra por palabra y clasifica huecos instrumentales.
-
-DATOS:
-- Duración: ${duracionMs}ms
-- Voz detectada: ${segmentosFormateados}
-- Huecos a verificar: ${huecosFormateados}
-- Perfil RMS: ${perfilRmsFormateado}
-
-TAREA:
-
-1. TRANSCRIPCIÓN:
-- Palabra individual con inicio_ms y fin_ms exactos
-- Timestamps dentro de segmentos VAD
-- Array vacío si instrumental
-
-2. HUECOS:
-- Clasifica cada hueco: instrumental_puro | coros_melodicos | adlibs_fx | voz_principal_residuo
-- Añade descripcion si no es instrumental_puro
-- energia_relativa (1-10) solo si hay voces`;
-
-  console.log('\n📝 PROMPT COMPLETO ENVIADO A GEMINI:');
-  console.log('═'.repeat(80));
-  console.log(prompt);
-  console.log('═'.repeat(80));
-  console.log('\n⏳ Esperando respuesta de Gemini...');
-
-  const ai = getGeminiClient();
-  const response = await ai.models.generateContent({
-    model: 'models/gemini-flash-latest',
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { fileData: { fileUri, mimeType: fileMimeType } },
-          { text: prompt }
-        ]
-      }
-    ],
-    config: {
-      temperature: 0, // Máxima precisión - confiamos 100% en los segmentos VAD
-      topP: 1,
-      topK: 1,
-      maxOutputTokens: 65536,
-      responseMimeType: 'application/json',
-      responseJsonSchema: transcriptionSchema,
-    }
-  });
-
-  const transcripcion = JSON.parse(response.text || '{"palabras":[],"analisis_huecos":[]}');
-
-  // Validar que las palabras estén dentro de los segmentos VAD
-  if (transcripcion.palabras && Array.isArray(transcripcion.palabras)) {
-    const palabrasOriginales = transcripcion.palabras.length;
-    transcripcion.palabras = transcripcion.palabras.filter((p: any) => {
-      if (typeof p.inicio_ms !== 'number' || typeof p.fin_ms !== 'number') return false;
-      if (p.inicio_ms < 0 || p.fin_ms > duracionMs || p.inicio_ms >= p.fin_ms) return false;
-
-      // Verificar que la palabra esté dentro de algún segmento VAD
-      return segmentosVoz.some(seg =>
-        p.inicio_ms >= seg.start_ms && p.fin_ms <= seg.end_ms
-      );
-    });
-    const palabrasDescartadas = palabrasOriginales - transcripcion.palabras.length;
-    if (palabrasDescartadas > 0) {
-      console.warn(`⚠️ ${palabrasDescartadas} palabras descartadas por estar fuera de segmentos VAD`);
-    }
-  }
-
-  // Validar análisis de huecos
-  if (transcripcion.analisis_huecos && Array.isArray(transcripcion.analisis_huecos)) {
-    const huecosOriginales = transcripcion.analisis_huecos.length;
-    transcripcion.analisis_huecos = transcripcion.analisis_huecos.filter((h: any) => {
-      if (typeof h.inicio_ms !== 'number' || typeof h.fin_ms !== 'number') return false;
-      if (!h.tipo || !['instrumental_puro', 'coros_melodicos', 'adlibs_fx', 'voz_principal_residuo'].includes(h.tipo)) return false;
-      if (h.inicio_ms < 0 || h.fin_ms > duracionMs || h.inicio_ms >= h.fin_ms) return false;
-
-      // Verificar que el hueco corresponda a uno calculado
-      return huecosInstrumentales.some(hueco =>
-        Math.abs(h.inicio_ms - hueco.inicio_ms) < 100 && Math.abs(h.fin_ms - hueco.fin_ms) < 100
-      );
-    });
-    const huecosDescartados = huecosOriginales - transcripcion.analisis_huecos.length;
-    if (huecosDescartados > 0) {
-      console.warn(`⚠️ ${huecosDescartados} huecos descartados por timestamps inválidos`);
-    }
-  }
-
-  console.log(`✅ PASO 1 completado: 
-  - ${transcripcion.palabras?.length || 0} palabras transcritas
-  - ${transcripcion.analisis_huecos?.length || 0} huecos analizados`);
-
-  return transcripcion;
-}
-
-/**
- * PASO 2: Análisis basado en transcripción (texto → texto) - RÁPIDO
- */
-export interface AnalisisAvanzadoSchema {
-  estructura: Array<{
-    seccion: 'intro' | 'verso' | 'estribillo' | 'puente' | 'instrumental' | 'outro' | 'build_up';
-    inicio_ms: number;
-    fin_ms: number;
-  }>;
-  tema: {
-    resumen: string;
-    palabras_clave: string[];
-    emocion: 'alegre' | 'triste' | 'energético' | 'romántico' | 'melancólico' | 'festivo' | 'reflexivo';
-  };
-  eventos_dj: Array<{
-    tipo: 'drop' | 'break' | 'build_up' | 'cambio_ritmo' | 'hook';
-    tiempo_ms: number;
-    descripcion?: string;
-  }>;
-}
-
-export async function analizarTranscripcion(
-  transcripcion: TranscripcionSchema,
-  analisisTecnico: {
-    bpm: number;
-    compas: { numerador: number; denominador: number };
-    energia: number;
-    bailabilidad: number;
-    animo_general: string;
-    tonalidad_camelot: string;
-    duracion_ms: number;
-    downbeats_ts_ms: number[];
-    frases_ts_ms: number[];
-    transientes_ritmicos_ts_ms: number[];
-  },
-  segmentosVoz: Array<{ start_ms: number; end_ms: number }>,
-  perfilEnergiaRMS: number[]
-): Promise<AnalisisAvanzadoSchema> {
-  console.log('🧠 PASO 2: Analizando transcripción y datos técnicos (rápido)...');
-
-  const analysisSchema = {
-    type: 'object',
-    properties: {
-      estructura: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            seccion: {
-              type: 'string',
-              enum: ['intro', 'verso', 'estribillo', 'puente', 'instrumental', 'outro', 'build_up']
-            },
-            inicio_ms: { type: 'number' },
-            fin_ms: { type: 'number' }
-          },
-          required: ['seccion', 'inicio_ms', 'fin_ms']
-        }
-      },
-      tema: {
-        type: 'object',
-        properties: {
-          resumen: { type: 'string' },
-          palabras_clave: { type: 'array', items: { type: 'string' } },
-          emocion: {
-            type: 'string',
-            enum: ['alegre', 'triste', 'energético', 'romántico', 'melancólico', 'festivo', 'reflexivo']
-          }
-        },
-        required: ['resumen', 'palabras_clave', 'emocion']
-      },
-      eventos_dj: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            tipo: {
-              type: 'string',
-              enum: ['drop', 'break', 'build_up', 'cambio_ritmo', 'hook']
-            },
-            tiempo_ms: { type: 'number' },
-            descripcion: { type: 'string' }
-          },
-          required: ['tipo', 'tiempo_ms']
-        }
-      }
-    },
-    required: ['estructura', 'tema', 'eventos_dj']
-  };
-
-  const letra = transcripcion.palabras
-    .map(p => `[${p.inicio_ms}ms - ${p.fin_ms}ms] ${p.palabra}`)
-    .join(' ');
-
-  const duracionMaxMs = analisisTecnico.duracion_ms;
-  const duracionSegundos = Math.floor(duracionMaxMs / 1000);
-  const segmentosFormateados = segmentosVoz.map(s => `[${s.start_ms}, ${s.end_ms}]`).join(', ');
-
-  // Optimización de tokens: limitar RMS para analizarTranscripcion
-  const MAX_RMS_ANALISIS = 1000;
-  let rmsAnalisis = perfilEnergiaRMS;
-  if (rmsAnalisis.length > MAX_RMS_ANALISIS) {
-    const step = Math.ceil(rmsAnalisis.length / MAX_RMS_ANALISIS);
-    rmsAnalisis = rmsAnalisis.filter((_, idx) => idx % step === 0);
-  }
-  const perfilRmsFormateado = `[${rmsAnalisis.map(v => v.toFixed(2)).join(', ')}]`;
-
-  const totalTransientesAnalisis = analisisTecnico.transientes_ritmicos_ts_ms.length;
-  const muestraTransientesAnalisis = analisisTecnico.transientes_ritmicos_ts_ms
-    .slice(0, Math.min(60, totalTransientesAnalisis))
-    .map(ms => Math.round(ms))
-    .join(', ');
-  const transientesFormateadosAnalisis = totalTransientesAnalisis
-    ? `${totalTransientesAnalisis} hits · muestra [${muestraTransientesAnalisis}${totalTransientesAnalisis > 60 ? ', …' : ''}]`
-    : '0 detectados';
-
-  const prompt = `Analiza esta canción con PRECISIÓN ABSOLUTA usando palabras alineadas + Perfil RMS.
-
-🎯 DATOS CONFIABLES AL 100%:
-- Duración EXACTA: ${duracionMaxMs}ms (${duracionSegundos}s)
-- Segmentos de voz VAD: ${segmentosFormateados}
-- Palabras ya alineadas a estos segmentos (ver abajo)
-- Perfil de Energía RMS (cada 250ms): ${perfilRmsFormateado}
-- Transientes rítmicos detectados: ${transientesFormateadosAnalisis}
-- BPM: ${analisisTecnico.bpm}
-- Energía: ${(analisisTecnico.energia * 100).toFixed(0)}%
-- Ánimo: ${analisisTecnico.animo_general}
-
-📝 PALABRAS ALINEADAS CON TIMESTAMPS PRECISOS:
-${letra || '[Instrumental - sin voces]'}
-
-🎯 TU TAREA:
-USA EXCLUSIVAMENTE los timestamps de las palabras Y el Perfil RMS para identificar:
-
-1️⃣ ESTRUCTURA musical (intro/verso/estribillo/puente/outro/instrumental/build_up)
-   - inicio_ms y fin_ms basados en palabras Y dinámica de energía
-   - Usa el Perfil RMS: descenso brusco = 'break', aumento progresivo = 'build_up', pico sostenido = 'estribillo'
-   - Los huecos entre segmentos VAD son secciones instrumentales
-   
-2️⃣ TEMA (resumen, palabras clave, emoción)
-   - Analiza el contenido lírico de las palabras
-   
-3️⃣ EVENTOS DJ (drops, breaks, build-ups, hooks)
-  - tiempo_ms debe coincidir con transientes fuertes y cambios de energía (RMS) o vocales
-   - JUSTIFICA tus decisiones basadas en el RMS
-
-⚠️ CRÍTICO: NO inventes timestamps. Usa solo los proporcionados: ${segmentosFormateados}`;
-
-  const ai = getGeminiClient();
-  const response = await ai.models.generateContent({
-    model: 'models/gemini-flash-latest',
-    contents: [
-      {
-        role: 'user',
-        parts: [{ text: prompt }]
-      }
-    ],
-    config: {
-      temperature: 0,
-      topP: 0.95,
-      topK: 40,
-      maxOutputTokens: 65536,
-      responseMimeType: 'application/json',
-      responseJsonSchema: analysisSchema,
-    }
-  });
-
-  const analisis = JSON.parse(response.text || '{}');
-
-  // Validar y limpiar timestamps inválidos en estructura
-  if (analisis.estructura && Array.isArray(analisis.estructura)) {
-    const seccionesOriginales = analisis.estructura.length;
-    analisis.estructura = analisis.estructura.filter((s: any) => {
-      return typeof s.inicio_ms === 'number' && typeof s.fin_ms === 'number' &&
-        s.inicio_ms >= 0 && s.fin_ms <= duracionMaxMs &&
-        s.inicio_ms < s.fin_ms;
-    });
-    const seccionesDescartadas = seccionesOriginales - analisis.estructura.length;
-    if (seccionesDescartadas > 0) {
-      console.warn(`⚠️ ${seccionesDescartadas} secciones descartadas por timestamps inválidos (>${duracionMaxMs}ms)`);
-    }
-  }
-
-  // Validar eventos DJ
-  if (analisis.eventos_dj && Array.isArray(analisis.eventos_dj)) {
-    const eventosOriginales = analisis.eventos_dj.length;
-    analisis.eventos_dj = analisis.eventos_dj.filter((e: any) => {
-      return typeof e.tiempo_ms === 'number' && e.tiempo_ms >= 0 && e.tiempo_ms <= duracionMaxMs;
-    });
-    const eventosDescartados = eventosOriginales - analisis.eventos_dj.length;
-    if (eventosDescartados > 0) {
-      console.warn(`⚠️ ${eventosDescartados} eventos DJ descartados por timestamps inválidos (>${duracionMaxMs}ms)`);
-    }
-  }
-
-  console.log(`✅ PASO 2 completado: ${analisis.estructura?.length || 0} secciones, ${analisis.eventos_dj?.length || 0} eventos DJ`);
-
-  return analisis;
-}
-
-/**
- * ANÁLISIS COMPLETO EN UNA SOLA PETICIÓN
- * Transcripción + Análisis en un solo llamado a Gemini
- */
-export interface AnalisisCompletoSchema {
-  transcripcion: {
-    palabras: Array<{
-      palabra: string;
-      inicio_ms: number;
-      fin_ms: number;
-    }>;
-    analisis_huecos?: AnalisisHuecoInstrumental[];
-  };
-  estructura: Array<{
-    seccion: 'intro' | 'verso' | 'estribillo' | 'puente' | 'instrumental' | 'outro' | 'build_up';
-    inicio_ms: number;
-    fin_ms: number;
-  }>;
-  tema: {
-    resumen: string;
-    palabras_clave: string[];
-    emocion: 'alegre' | 'triste' | 'energético' | 'romántico' | 'melancólico' | 'festivo' | 'reflexivo';
-  };
-  eventos_dj: Array<{
-    tipo: 'drop' | 'break' | 'build_up' | 'cambio_ritmo' | 'hook';
-    tiempo_ms: number;
-    descripcion?: string;
-  }>;
-  diagnostico_tecnico?: {
-    resumen_segmentos_voz?: string;
-    segmentos_fuera_vad?: number;
-    perfil_energia_resumen?: string;
-    energia_promedio?: number;
-    energia_picos_ms?: number[];
-    energia_valles_ms?: number[];
-    huecos_resumen?: string;
-  };
-}
-
-
-export async function analizarConGeminiOptimizado(params: {
+// ============================================================================
+// TYPES
+// ============================================================================
+
+export interface AnalisisGeminiParams {
   fileUri?: string;
   fileMimeType: string;
   fileBuffer?: ArrayBuffer;
-  segmentosVoz: Array<{ start_ms: number; end_ms: number }>;
-  perfilEnergiaRMS?: number[];
+  segmentosVoz: SegmentoVoz[];
   nombreCancion?: string;
   analisisTecnico: {
+    duracion_ms: number;
     bpm: number;
-    compas: { numerador: number; denominador: number };
     energia: number;
-    bailabilidad: number;
-    animo_general: string;
     tonalidad_camelot: string;
     tonalidad_compatible: string[];
-    duracion_ms: number;
-    downbeats_ts_ms: number[];
+    bailabilidad: number;
+    animo_general: string;
+    compas: { numerador: number; denominador: number };
     beats_ts_ms: number[];
+    downbeats_ts_ms: number[];
     frases_ts_ms: number[];
-    ritmoAvanzado?: {
-      beats_loudness?: number[];
-    };
   };
-  // Datos adicionales para CancionAnalizada
   hash_archivo: string;
   titulo: string;
   apiKeyOverride?: string;
   jobId?: string;
-}): Promise<CancionAnalizada> {
+}
+
+// ============================================================================
+// MAIN FUNCTION
+// ============================================================================
+
+export async function analizarConGeminiDJ(params: AnalisisGeminiParams): Promise<CancionAnalizada> {
   let ai = getGeminiClient(params.apiKeyOverride);
   const inicio = Date.now();
-  console.log('\n🚀 ANÁLISIS COMPLETO CON GEMINI + VAD (OPTIMIZADO)');
-  if (params.jobId) {
-    await actualizarProgresoJob(params.jobId, 82, 'Generando prompt para Gemini...');
-  }
 
+  console.log('\n🎧 ANÁLISIS DJ-CENTRIC CON GEMINI (ULTRA-RÁPIDO)');
   console.log('═'.repeat(80));
+
   if (params.nombreCancion) {
     console.log(`📀 Canción: ${params.nombreCancion}`);
   }
-  console.log(`⏱️  Duración: ${params.analisisTecnico.duracion_ms}ms (${Math.floor(params.analisisTecnico.duracion_ms / 1000)}s)`);
 
-  // Schema SIMPLIFICADO para velocidad
-  // Schema OPTIMIZADO - sin campos innecesarios (confianza siempre 1, descripcion no usada)
-  const completeSchema = {
+  if (params.jobId) {
+    await actualizarProgresoJob(params.jobId, 82, 'Iniciando análisis DJ-céntrico...');
+  }
+
+  const duracionMaxMs = params.analisisTecnico.duracion_ms;
+  const duracionFormatted = formatTimeForPrompt(duracionMaxMs);
+  const durationSec = msToSec(duracionMaxMs);
+
+  // Preparar contexto VAD en formato MM:SS
+  const segmentosContexto = params.segmentosVoz && params.segmentosVoz.length > 0
+    ? params.segmentosVoz.map(s => `[${formatTimeForPrompt(s.start_ms)}-${formatTimeForPrompt(s.end_ms)}]`).join(', ')
+    : 'No disponible (analizar audio para detectar voz)';
+
+  console.log(`⏱️  Duración: ${duracionFormatted} (${durationSec}s)`);
+  console.log(`🎤 Zonas VAD: ${segmentosContexto}`);
+
+  // ============================================================================
+  // DJ-CENTRIC SCHEMA
+  // ============================================================================
+
+  // ============================================================================
+  // SCHEMA ULTRA-OPTIMIZADO - Solo datos para algoritmo A* de mezcla
+  // ============================================================================
+  const djSchema = {
     type: 'object',
     properties: {
-      transcripcion: {
-        type: 'object',
-        properties: {
-          palabras: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                palabra: { type: 'string' },
-                inicio_ms: { type: 'number' },
-                fin_ms: { type: 'number' }
-              },
-              required: ['palabra', 'inicio_ms', 'fin_ms']
-            }
-          },
-          analisis_huecos: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                inicio_ms: { type: 'number' },
-                fin_ms: { type: 'number' },
-                tipo: {
-                  type: 'string',
-                  enum: ['instrumental_puro', 'coros_melodicos', 'adlibs_fx', 'voz_principal_residuo']
-                }
-              },
-              required: ['inicio_ms', 'fin_ms', 'tipo']
-            }
-          }
-        },
-        required: ['palabras', 'analisis_huecos']
-      },
       estructura: {
         type: 'array',
         items: {
@@ -865,214 +182,191 @@ export async function analizarConGeminiOptimizado(params: {
           properties: {
             seccion: {
               type: 'string',
-              enum: ['intro', 'verso', 'estribillo', 'puente', 'instrumental', 'outro', 'build_up']
+              enum: ['intro', 'verso', 'estribillo', 'puente', 'instrumental', 'outro', 'drop', 'build_up']
             },
-            inicio_ms: { type: 'number' },
-            fin_ms: { type: 'number' }
+            inicio_segundos: { type: 'number' },
+            fin_segundos: { type: 'number' }
           },
-          required: ['seccion', 'inicio_ms', 'fin_ms']
+          required: ['seccion', 'inicio_segundos', 'fin_segundos']
         }
       },
-      tema: {
-        type: 'object',
-        properties: {
-          palabras_clave: { type: 'array', items: { type: 'string' } },
-          emocion: {
-            type: 'string',
-            enum: ['alegre', 'triste', 'energético', 'romántico', 'melancólico', 'festivo', 'reflexivo', 'neutral']
-          }
-        },
-        required: ['palabras_clave', 'emocion']
+      vocales_principales: {
+        type: 'array',
+        description: 'Solo bloques de voz PRINCIPAL (versos/coros). NO adlibs ni gritos cortos',
+        items: {
+          type: 'object',
+          properties: {
+            tipo: {
+              type: 'string',
+              enum: ['bloque_verso', 'bloque_coro']
+            },
+            inicio_segundos: { type: 'number' },
+            fin_segundos: { type: 'number' }
+          },
+          required: ['tipo', 'inicio_segundos', 'fin_segundos']
+        }
+      },
+      loops: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            frase: { type: 'string' },
+            inicio_segundos: { type: 'number' },
+            fin_segundos: { type: 'number' },
+            score: { type: 'number', minimum: 1, maximum: 10 }
+          },
+          required: ['frase', 'inicio_segundos', 'fin_segundos', 'score']
+        }
       },
       eventos_dj: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
-            tipo: {
-              type: 'string',
-              enum: ['drop', 'break', 'build_up', 'cambio_ritmo', 'hook']
-            },
-            tiempo_ms: { type: 'number' }
+            tipo: { type: 'string', enum: ['drop', 'break', 'build_up'] },
+            tiempo_segundos: { type: 'number' }
           },
-          required: ['tipo', 'tiempo_ms']
+          required: ['tipo', 'tiempo_segundos']
         }
       }
     },
-    required: ['transcripcion', 'estructura', 'tema', 'eventos_dj']
+    required: ['estructura', 'vocales_principales', 'loops', 'eventos_dj']
   };
 
-  const duracionMaxMs = params.analisisTecnico.duracion_ms;
-  const duracionContexto = formatTimeContext(duracionMaxMs);
+  // ============================================================================
+  // PROMPT ULTRA-OPTIMIZADO - Solo datos de mezcla
+  // ============================================================================
 
-  // Preparar contexto VAD simplificado
-  const segmentosContexto = params.segmentosVoz
-    .map(s => `[${Math.round(s.start_ms)}-${Math.round(s.end_ms)}ms]`)
-    .join(', ');
+  // ============================================================================
+  // PROMPT ANTI-ALUCINACIONES CON GROUND TRUTH
+  // ============================================================================
+  const prompt = `ACTÚA COMO INGENIERO DE AUDIO. ANALIZA ESTE ARCHIVO ESPECÍFICO.
 
-  // Calcular huecos instrumentales
-  const huecosInstrumentales: Array<{ inicio_ms: number; fin_ms: number }> = [];
-  if (params.segmentosVoz.length > 0 && params.segmentosVoz[0].start_ms > 0) {
-    huecosInstrumentales.push({ inicio_ms: 0, fin_ms: params.segmentosVoz[0].start_ms });
-  }
-  for (let i = 0; i < params.segmentosVoz.length - 1; i++) {
-    const finActual = params.segmentosVoz[i].end_ms;
-    const inicioSiguiente = params.segmentosVoz[i + 1].start_ms;
-    if (inicioSiguiente > finActual) {
-      huecosInstrumentales.push({ inicio_ms: finActual, fin_ms: inicioSiguiente });
-    }
-  }
-  if (params.segmentosVoz.length > 0 && params.segmentosVoz[params.segmentosVoz.length - 1].end_ms < duracionMaxMs) {
-    huecosInstrumentales.push({
-      inicio_ms: params.segmentosVoz[params.segmentosVoz.length - 1].end_ms,
-      fin_ms: duracionMaxMs
-    });
-  }
-  const huecosContexto = huecosInstrumentales
-    .map(h => `[${Math.round(h.inicio_ms)}-${Math.round(h.fin_ms)}ms]`)
-    .join(', ');
+⚠️ ADVERTENCIA DE SEGURIDAD:
+Este audio puede ser un REMIX, RADIO EDIT o EXTENDED MIX.
+NO USES TU MEMORIA sobre la "canción original".
+SOLO ANALIZA LO QUE ESCUCHAS Y LOS DATOS TÉCNICOS PROVISTOS.
 
-  // RMS simplificado (menos puntos)
-  const MAX_RMS_POINTS = 200; // Reducido drásticamente para ahorrar tokens
-  let rmsParaPrompt = params.perfilEnergiaRMS || [];
-  if (rmsParaPrompt.length > MAX_RMS_POINTS) {
-    const step = Math.ceil(rmsParaPrompt.length / MAX_RMS_POINTS);
-    rmsParaPrompt = rmsParaPrompt.filter((_, idx) => idx % step === 0);
-  }
-  const perfilRmsFormateado = `[${rmsParaPrompt.map(v => v.toFixed(2)).join(',')}]`;
+DATOS TÉCNICOS (VERDAD ABSOLUTA):
+- Duración Total: ${durationSec} segundos.
+- Zonas con VOZ HUMANA (VAD): ${segmentosContexto || "NINGUNA DETECTADA"}
+- BPM: ${params.analisisTecnico.bpm}
 
-  const prompt = `ANÁLISIS DJ EXPRESS - Transcripción y Estructura Musical
+REGLAS ESTRICTAS DE ESTRUCTURA:
+1. Si un segmento de tiempo NO está en la lista de "Zonas con VOZ HUMANA", es IMPOSIBLE que sea "verso" o "estribillo". Debe ser "intro", "instrumental", "puente", "drop" u "outro".
+2. NO inventes letra en zonas instrumentales.
+3. El "Outro" debe terminar exactamente en el segundo ${durationSec}.
 
-DATOS TÉCNICOS:
-- Duración: ${duracionContexto}
-- Segmentos con voz (VAD): ${segmentosContexto}
-- Huecos instrumentales: ${huecosContexto}
-- Energía RMS: ${perfilRmsFormateado}
-- BPM: ${params.analisisTecnico.bpm} | Energía: ${(params.analisisTecnico.energia * 100).toFixed(0)}%
+TAREAS (JSON en SEGUNDOS):
+1. "estructura": Segmentación completa.
+2. "vocales_principales": Bloques grandes de voz (Versos/Coros). IGNORA voces cortas (adlibs).
+3. "loops": Frases repetitivas al final de bloques para mezclar (ej: "tú sabes... tú sabes...").
+4. "eventos_dj": Drops y cambios de energía.
 
-INSTRUCCIONES DE SEGURIDAD CRÍTICAS:
-1. ⛔ PROHIBIDO ALUCINAR LETRA: Si el audio es instrumental en una sección, NO inventes letra aunque conozcas la canción.
-2. ⛔ RESPETAR VAD: Solo genera palabras cuyos timestamps caigan DENTRO de los "Segmentos con voz" proporcionados arriba.
-3. Si una sección es instrumental, devuelve array vacío [] en palabras.
+Responde solo con el JSON.`;
 
-TAREAS (devolver JSON):
+  console.log('\n📝 Enviando prompt DJ-céntrico a Gemini...');
 
-1. TRANSCRIPCIÓN (transcripcion.palabras):
-   - Transcribe letra palabra por palabra
-   - Timestamps exactos: inicio_ms, fin_ms
-   - CRÍTICO: Solo en segmentos VAD detectados
-   - Array vacío si es instrumental
-
-2. HUECOS (transcripcion.analisis_huecos):
-   - Clasifica cada hueco: instrumental_puro | coros_melodicos | adlibs_fx | voz_principal_residuo
-   - Solo tipo, inicio_ms, fin_ms (sin descripción)
-
-3. ESTRUCTURA (estructura):
-   - Divide en secciones: intro, verso, estribillo, puente, instrumental, outro, build_up
-   - Usa cambios de energía y contenido lírico
-
-4. TEMA (tema):
-   - palabras_clave: array de palabras importantes
-   - emocion: alegre | triste | energético | romántico | melancólico | festivo | reflexivo | neutral
-
-5. EVENTOS DJ (eventos_dj):
-   - Identifica: drop, break, build_up, cambio_ritmo, hook
-   - Solo tipo y tiempo_ms
-
-IMPORTANTE: Sé rápido y preciso. Timestamps en milisegundos.`;
-
-  console.log('\n📝 PROMPT SIMPLIFICADO ENVIADO A GEMINI');
   if (params.jobId) {
     await actualizarProgresoJob(params.jobId, 85, 'Esperando respuesta de Gemini...');
   }
 
+  // ============================================================================
+  // LLAMADA A GEMINI CON RETRY INTELIGENTE
+  // ============================================================================
 
-  // Usar modelo más rápido primero, fallback a flash si falla
-  const modelos = [
-    { id: 'models/gemini-flash-latest', label: 'Gemini Flash Lite (rápido)' },
-    { id: 'models/gemini-flash-latest', label: 'Gemini Flash (fallback)' },
-  ];
-
-  const maxIntentosPorModelo = 3; // Aumentado a 3 intentos
+  const maxIntentos = 3;
   let response: any;
   const errores: any[] = [];
   const allKeys = getGeminiApiKeys();
-  let currentKeyAttempt = 0;
+  let currentKeyIndex = 0;
 
-  for (const modelo of modelos) {
-    let intentos = 0;
-    while (intentos < maxIntentosPorModelo) {
-      try {
-        console.log(`   Intento ${intentos + 1}/${maxIntentosPorModelo} con ${modelo.label}...`);
-        const parts: any[] = [];
-        if (params.fileUri) {
-          parts.push({ fileData: { fileUri: params.fileUri, mimeType: params.fileMimeType } });
-        } else if (params.fileBuffer) {
-          const buffer = Buffer.from(params.fileBuffer instanceof ArrayBuffer ? new Uint8Array(params.fileBuffer) : params.fileBuffer);
-          parts.push({ inlineData: { data: buffer.toString('base64'), mimeType: params.fileMimeType } });
+  for (let intento = 0; intento < maxIntentos; intento++) {
+    try {
+      console.log(`   Intento ${intento + 1}/${maxIntentos}...`);
+
+      const parts: any[] = [];
+
+      if (params.fileUri) {
+        parts.push({ fileData: { fileUri: params.fileUri, mimeType: params.fileMimeType } });
+      } else if (params.fileBuffer) {
+        const buffer = Buffer.from(
+          params.fileBuffer instanceof ArrayBuffer ? new Uint8Array(params.fileBuffer) : params.fileBuffer
+        );
+        parts.push({ inlineData: { data: buffer.toString('base64'), mimeType: params.fileMimeType } });
+      }
+
+      parts.push({ text: prompt });
+
+      // Usamos gemini-flash-latest por ser más estable y tener mejores cuotas que el experimental
+      response = await ai.models.generateContent({
+        model: 'models/gemini-flash-latest',
+        contents: [{ role: 'user', parts }],
+        config: {
+          temperature: 0.2,
+          topP: 0.95,
+          topK: 40,
+          maxOutputTokens: 8192,
+          responseMimeType: 'application/json',
+          responseJsonSchema: djSchema,
         }
-        parts.push({ text: prompt });
+      });
 
-        response = await ai.models.generateContent({
-          model: modelo.id,
-          contents: [{ role: 'user', parts }],
-          config: {
-            temperature: 1.0, // Según docs de Gemini para mejor creatividad
-            topP: 0.95,
-            topK: 40,
-            maxOutputTokens: 65536,
-            responseMimeType: 'application/json',
-            responseJsonSchema: completeSchema,
-          }
-        });
-        markKeySuccess(ai);
-        console.log(`✅ Respuesta exitosa con ${modelo.label}`);
-        break;
-      } catch (error: any) {
-        intentos++;
-        const errorMsg = error?.message || String(error);
-        const errorCode = error?.status || error?.code || error?.error?.code;
-        errores.push({ error: errorMsg, code: errorCode, modelo: modelo.label });
+      console.log(`✅ Respuesta exitosa en intento ${intento + 1}`);
+      break; // Exit loop on success
 
-        console.warn(`⚠️ Error en intento ${intentos}: ${errorMsg} (código: ${errorCode})`);
+    } catch (error: any) {
+      // Only log and retry if we don't have a response yet
+      const errorMsg = error?.message || String(error);
+      const errorCode = error?.status || error?.code || error?.error?.code;
+      errores.push({ error: errorMsg, code: errorCode });
 
-        // Si es error 429 (rate limit), cambiar inmediatamente a otra key
-        if (errorCode === 429 || errorMsg.includes('quota') || errorMsg.includes('RESOURCE_EXHAUSTED')) {
-          console.warn(`🔄 Error 429 detectado - cambiando a otra API key...`);
-          markKeyFailure(ai);
+      console.warn(`⚠️ Error en intento ${intento + 1}: ${errorMsg} (código: ${errorCode})`);
 
-          // Intentar con otra key si hay disponibles
-          if (currentKeyAttempt < allKeys.length - 1) {
-            currentKeyAttempt++;
-            ai = getGeminiClient(); // Obtener nueva key
-            console.log(`🔑 Cambiado a nueva API key para reintentar`);
-            await new Promise(resolve => setTimeout(resolve, 500)); // Pequeña pausa
-            continue; // Reintentar con nueva key
-          } else {
-            console.error(`❌ Todas las API keys agotadas`);
-            break;
-          }
-        }
+      // Extraer tiempo de espera sugerido (retryDelay)
+      let waitTime = 2000 * (intento + 1); // Default backoff
+      const retryDelayMatch = errorMsg.match(/retry in ([\d.]+)s/);
+      if (retryDelayMatch) {
+        waitTime = Math.ceil(parseFloat(retryDelayMatch[1]) * 1000) + 1000; // +1s buffer
+        console.log(`⏳ Gemini solicita espera de ${waitTime}ms`);
+      }
 
-        if (isRetryableGeminiError(error)) {
-          await new Promise(resolve => setTimeout(resolve, 1000 * intentos));
+      // Si es error 429 (Quota), intentar cambiar de key INMEDIATAMENTE si hay disponibles
+      if (errorCode === 429 || errorMsg.includes('429') || errorMsg.includes('quota')) {
+        if (currentKeyIndex < allKeys.length - 1) {
+          currentKeyIndex++;
+          ai = getGeminiClient(allKeys[currentKeyIndex]); // Forzar siguiente key
+          console.log(`🔑 Cuota excedida. Cambiando a Key #${currentKeyIndex + 1}...`);
+          await new Promise(resolve => setTimeout(resolve, 1000)); // Pequeña pausa
+          continue; // Reintentar con nueva key
         } else {
-          console.error(`❌ Error no recuperable: ${errorMsg}`);
-          break;
+          console.warn('⚠️ Todas las API keys han agotado su cuota o fallado.');
+          // Si todas fallan, esperar el tiempo solicitado antes de reintentar con la primera (o la actual)
+          if (intento < maxIntentos - 1) {
+            console.log(`⏳ Esperando ${waitTime}ms antes de reintentar...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          }
         }
+      } else if (isRetryableError(error) && intento < maxIntentos - 1) {
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      } else if (intento === maxIntentos - 1) {
+        break;
       }
     }
-    if (response) break;
   }
 
   if (!response) {
-    const errorDetails = errores.map(e => `${e.modelo}: ${e.error} (${e.code})`).join(' | ');
+    const errorDetails = errores.map(e => `${e.error} (${e.code})`).join(' | ');
     throw new Error(`Fallo en Gemini tras ${errores.length} intentos. Errores: ${errorDetails}`);
   }
 
-  // Parsear y validar JSON
+  // ============================================================================
+  // PROCESAMIENTO DE RESPUESTA
+  // ============================================================================
+
   if (params.jobId) {
-    await actualizarProgresoJob(params.jobId, 95, 'Procesando respuesta de Gemini...');
+    await actualizarProgresoJob(params.jobId, 95, 'Procesando respuesta...');
   }
 
   let resultado: any;
@@ -1082,224 +376,146 @@ IMPORTANTE: Sé rápido y preciso. Timestamps en milisegundos.`;
     throw new Error('Respuesta JSON inválida de Gemini');
   }
 
-  // ==================================================================================
-  // 🛡️ FILTRO DE ALUCINACIONES - "Cúpula de Hierro"
-  // ==================================================================================
-  // Elimina palabras que Gemini haya inventado en zonas instrumentales
-  // Confianza: Análisis de señal matemático > LLM
-  
-  const TOLERANCIA_MS = 300; // Margen para palabras en el borde de segmentos
-  let palabrasOriginales = 0;
-  let palabrasEliminadas = 0;
+  console.log('\n📊 Procesando respuesta DJ-céntrica...');
 
-  if (Array.isArray(resultado.transcripcion?.palabras)) {
-    palabrasOriginales = resultado.transcripcion.palabras.length;
-    
-    resultado.transcripcion.palabras = resultado.transcripcion.palabras.filter((p: any) => {
-      const inicio = Number(p.inicio_ms);
-      const fin = Number(p.fin_ms);
-      
-      // Validar números
-      if (isNaN(inicio) || isNaN(fin)) return false;
+  // ============================================================================
+  // POST-PROCESAMIENTO CON VALIDACIÓN VAD (GROUND TRUTH)
+  // ============================================================================
 
-      // VERIFICACIÓN CONTRA VAD:
-      // ¿Esta palabra cae dentro de algún segmento donde detectamos energía vocal?
-      const caeEnZonaVocal = params.segmentosVoz.some(seg => {
-        const segInicio = seg.start_ms - TOLERANCIA_MS;
-        const segFin = seg.end_ms + TOLERANCIA_MS;
+  // 1. Convertir estructura (segundos → ms) y CORREGIR ALUCINACIONES
+  const estructura = Array.isArray(resultado.estructura)
+    ? resultado.estructura.map((s: any) => {
+      const inicioMs = Math.min(secToMs(s.inicio_segundos), duracionMaxMs);
+      const finMs = Math.min(secToMs(s.fin_segundos), duracionMaxMs);
 
-        // Lógica de superposición:
-        // La palabra empieza dentro O termina dentro O engloba al segmento
-        return (inicio >= segInicio && inicio <= segFin) || 
-               (fin >= segInicio && fin <= segFin) ||
-               (inicio <= segInicio && fin >= segFin);
-      });
+      let seccion = s.seccion;
 
-      if (!caeEnZonaVocal) {
-        palabrasEliminadas++;
-        console.warn(`👻 Alucinación detectada: "${p.palabra}" en [${inicio}-${fin}ms] (Zona Instrumental)`);
+      // VALIDACIÓN DE REALIDAD:
+      // Si Gemini dice "verso" o "estribillo", pero el VAD dice que hay silencio...
+      // ...lo cambiamos a "instrumental" o "puente" forzosamente.
+      const esVocal = ['verso', 'estribillo'].includes(seccion.toLowerCase());
+      const hayVozReal = validarPresenciaVocal(inicioMs, finMs, params.segmentosVoz);
+
+      if (esVocal && !hayVozReal) {
+        console.warn(`👻 Alucinación corregida: "${seccion}" en ${s.inicio_segundos}s cambiado a "puente" por falta de VAD.`);
+        seccion = 'puente'; // O 'instrumental'
       }
 
-      return caeEnZonaVocal;
-    });
-    
-    if (palabrasEliminadas > 0) {
-      console.log(`🛡️  Filtro de alucinaciones: ${palabrasEliminadas}/${palabrasOriginales} palabras eliminadas`);
-    }
+      return {
+        seccion,
+        inicio_ms: inicioMs,
+        fin_ms: finMs
+      };
+    }).filter((s: any) => s.inicio_ms < s.fin_ms)
+    : [];
+
+  // Fix: El último segmento debe terminar exactamente en duracionMaxMs
+  if (estructura.length > 0) {
+    estructura[estructura.length - 1].fin_ms = duracionMaxMs;
   }
 
-  // Recalcular huecos basándose en palabras filtradas
-  const palabrasFiltradas = resultado.transcripcion?.palabras || [];
-  const huecosRecalculados: any[] = [];
-  
-  if (palabrasFiltradas.length > 0) {
-    // Ordenar palabras por tiempo
-    palabrasFiltradas.sort((a: any, b: any) => a.inicio_ms - b.inicio_ms);
+  // 2. Convertir vocales_principales (con filtro de segmentos cortos Y validación VAD)
+  const vocalesClave: BloqueVocal[] = Array.isArray(resultado.vocales_principales)
+    ? resultado.vocales_principales.map((v: any) => ({
+      tipo: v.tipo as BloqueVocal['tipo'],
+      inicio_ms: Math.min(secToMs(v.inicio_segundos), duracionMaxMs),
+      fin_ms: Math.min(secToMs(v.fin_segundos), duracionMaxMs)
+    }))
+      // Filtro 1: Duración mínima (evita ruiditos)
+      .filter((v: any) => (v.fin_ms - v.inicio_ms) > 1500)
+      // Filtro 2: GROUND TRUTH - Validación contra VAD real
+      .filter((v: any) => {
+        const hayVoz = validarPresenciaVocal(v.inicio_ms, v.fin_ms, params.segmentosVoz);
+        if (!hayVoz) {
+          console.warn(`👻 Vocal alucinado eliminado: ${v.tipo} en ${msToSec(v.inicio_ms)}s (sin VAD)`);
+        }
+        return hayVoz;
+      })
+    : [];
 
-    // Hueco inicial (si la primera palabra empieza tarde)
-    if (palabrasFiltradas[0].inicio_ms > 4000) {
-      huecosRecalculados.push({
+  // 3. Convertir loops
+  const loopsTransicion: LoopTransicion[] = Array.isArray(resultado.loops)
+    ? resultado.loops.map((l: any) => ({
+      texto: String(l.frase || ''),
+      inicio_ms: Math.min(secToMs(l.inicio_segundos), duracionMaxMs),
+      fin_ms: Math.min(secToMs(l.fin_segundos), duracionMaxMs),
+      score: Math.max(1, Math.min(10, Number(l.score) || 5))
+    })).filter((l: any) => l.inicio_ms < l.fin_ms)
+    : [];
+
+
+  const eventosDj = Array.isArray(resultado.eventos_dj)
+    ? resultado.eventos_dj.map((e: any) => ({
+      tipo: e.tipo,
+      tiempo_ms: Math.min(secToMs(e.tiempo_segundos), duracionMaxMs)
+    }))
+    : [];
+
+  // 5. Recalcular huecos instrumentales basándonos en vocales_clave
+  const huecos: any[] = [];
+
+  if (vocalesClave.length > 0) {
+    const vocalesOrdenadas = [...vocalesClave].sort((a, b) => a.inicio_ms - b.inicio_ms);
+
+    // Hueco antes del primer bloque vocal
+    if (vocalesOrdenadas[0].inicio_ms > 4000) {
+      huecos.push({
         inicio_ms: 0,
-        fin_ms: palabrasFiltradas[0].inicio_ms,
+        fin_ms: vocalesOrdenadas[0].inicio_ms,
         tipo: 'instrumental_puro'
       });
     }
 
-    // Huecos intermedios
-    for (let i = 0; i < palabrasFiltradas.length - 1; i++) {
-      const finActual = palabrasFiltradas[i].fin_ms;
-      const inicioSiguiente = palabrasFiltradas[i + 1].inicio_ms;
-      const duracionHueco = inicioSiguiente - finActual;
-
-      if (duracionHueco > 3000) { // Solo huecos mayores a 3 segundos
-        huecosRecalculados.push({
-          inicio_ms: finActual,
-          fin_ms: inicioSiguiente,
+    // Huecos entre bloques vocales
+    for (let i = 0; i < vocalesOrdenadas.length - 1; i++) {
+      const gap = vocalesOrdenadas[i + 1].inicio_ms - vocalesOrdenadas[i].fin_ms;
+      if (gap > 3000) {
+        huecos.push({
+          inicio_ms: vocalesOrdenadas[i].fin_ms,
+          fin_ms: vocalesOrdenadas[i + 1].inicio_ms,
           tipo: 'instrumental_puro'
         });
       }
     }
-    
-    // Hueco final
-    const ultimaPalabra = palabrasFiltradas[palabrasFiltradas.length - 1];
-    if (duracionMaxMs - ultimaPalabra.fin_ms > 4000) {
-      huecosRecalculados.push({
-        inicio_ms: ultimaPalabra.fin_ms,
+
+    // Hueco después del último bloque vocal
+    const ultimoVocal = vocalesOrdenadas[vocalesOrdenadas.length - 1];
+    if (duracionMaxMs - ultimoVocal.fin_ms > 4000) {
+      huecos.push({
+        inicio_ms: ultimoVocal.fin_ms,
         fin_ms: duracionMaxMs,
         tipo: 'instrumental_puro'
       });
     }
   } else {
-    // Si no hay palabras (totalmente instrumental), todo es un hueco
-    huecosRecalculados.push({
+    // Si no hay vocales, toda la canción es instrumental
+    huecos.push({
       inicio_ms: 0,
       fin_ms: duracionMaxMs,
       tipo: 'instrumental_puro'
     });
   }
 
-  // Mezclar tipos que Gemini detectó con tiempos reales
-  const huecosFinales = huecosRecalculados.map(huecoReal => {
-    // Buscar si Gemini clasificó este rango temporal
-    const opinionGemini = resultado.transcripcion?.analisis_huecos?.find((h: any) => {
-      const solapamiento = Math.max(huecoReal.inicio_ms, h.inicio_ms) < 
-                          Math.min(huecoReal.fin_ms, h.fin_ms);
-      return solapamiento;
-    });
-    
-    return {
-      ...huecoReal,
-      tipo: opinionGemini?.tipo || 'instrumental_puro',
-      descripcion: opinionGemini?.descripcion
-    };
-  });
+  // Validación
+  console.log(`✅ Análisis DJ completado:`);
+  console.log(`   ✅ Estructura: ${estructura.length} secciones`);
+  console.log(`   ✅ Vocales: ${vocalesClave.length} bloques`);
+  console.log(`   ✅ Loops: ${loopsTransicion.length} candidatos`);
+  console.log(`   ✅ Huecos: ${huecos.length} zonas instrumentales`);
+  console.log(`   ✅ Eventos DJ: ${eventosDj.length}`);
+  console.log(`⚡ Completado en ${(Date.now() - inicio) / 1000}s`);
 
-  // Reemplazar los huecos de Gemini con los recalculados
-  if (resultado.transcripcion) {
-    resultado.transcripcion.analisis_huecos = huecosFinales;
-  }
+  // ============================================================================
+  // MAPEO A TIPOS INTERNOS
+  // ============================================================================
 
-  // ==================================================================================
-  // FIN DEL FILTRO DE ALUCINACIONES
-  // ==================================================================================
-
-  // 🔒 VALIDACIÓN EXHAUSTIVA: Verificar TODOS los campos obligatorios
-  const validaciones = {
-    transcripcion: !!resultado.transcripcion,
-    palabras: Array.isArray(resultado.transcripcion?.palabras),
-    analisis_huecos: Array.isArray(resultado.transcripcion?.analisis_huecos),
-    estructura: Array.isArray(resultado.estructura) && resultado.estructura.length > 0,
-    tema: !!resultado.tema,
-    palabras_clave: Array.isArray(resultado.tema?.palabras_clave),
-    emocion: !!resultado.tema?.emocion,
-    eventos_dj: Array.isArray(resultado.eventos_dj)
-  };
-
-  // Lista de campos críticos OBLIGATORIOS (deben existir siempre)
-  const camposFaltantes: string[] = [];
-  if (!validaciones.transcripcion) camposFaltantes.push('transcripcion');
-  if (!validaciones.palabras) camposFaltantes.push('transcripcion.palabras (array)');
-  if (!validaciones.analisis_huecos) camposFaltantes.push('transcripcion.analisis_huecos (array)');
-  if (!validaciones.estructura) camposFaltantes.push('estructura (array con elementos)');
-  if (!validaciones.tema) camposFaltantes.push('tema');
-  if (!validaciones.palabras_clave) camposFaltantes.push('tema.palabras_clave (array)');
-  if (!validaciones.emocion) camposFaltantes.push('tema.emocion');
-  if (!validaciones.eventos_dj) camposFaltantes.push('eventos_dj (array)');
-
-  // ❌ Si falta CUALQUIER campo obligatorio, rechazar respuesta y reintentar
-  if (camposFaltantes.length > 0) {
-    console.error('❌ Gemini devolvió respuesta INCOMPLETA - campos faltantes:');
-    console.error(`   📋 Faltantes: ${camposFaltantes.join(', ')}`);
-    console.error('   📄 Respuesta recibida:', JSON.stringify(resultado, null, 2));
-    throw new Error(`Gemini devolvió respuesta incompleta. Faltan: ${camposFaltantes.join(', ')}. Reintentando...`);
-  }
-
-  // ✅ Log de validación exitosa
-  console.log(`📊 Validación COMPLETA:`);
-  console.log(`   ✅ Palabras: ${resultado.transcripcion.palabras.length}`);
-  console.log(`   ✅ Huecos: ${resultado.transcripcion.analisis_huecos.length}`);
-  console.log(`   ✅ Estructura: ${resultado.estructura.length} secciones`);
-  console.log(`   ✅ Tema: ${resultado.tema.palabras_clave.length} palabras clave, emoción: ${resultado.tema.emocion}`);
-  console.log(`   ✅ Eventos DJ: ${resultado.eventos_dj.length}`);
-
-  // Sanitización básica
-  const palabrasSanitizadas = Array.isArray(resultado.transcripcion?.palabras)
-    ? resultado.transcripcion.palabras.map((p: any) => ({
-      palabra: String(p.palabra),
-      inicio_ms: Number(p.inicio_ms),
-      fin_ms: Number(p.fin_ms)
-    }))
-    : [];
-
-  const huecosSanitizados = Array.isArray(resultado.transcripcion?.analisis_huecos)
-    ? resultado.transcripcion.analisis_huecos.map((h: any) => ({
-      inicio_ms: Number(h.inicio_ms),
-      fin_ms: Number(h.fin_ms),
-      tipo: h.tipo,
-      descripcion: h.descripcion
-    }))
-    : [];
-
-  const estructuraSanitizada = Array.isArray(resultado.estructura)
-    ? resultado.estructura.map((s: any) => ({
-      seccion: s.seccion,
-      inicio_ms: Number(s.inicio_ms),
-      fin_ms: Number(s.fin_ms)
-    }))
-    : [];
-
-  const eventosSanitizados = Array.isArray(resultado.eventos_dj)
-    ? resultado.eventos_dj.map((e: any) => ({
-      tipo: e.tipo,
-      tiempo_ms: Number(e.tiempo_ms),
-      descripcion: e.descripcion
-    }))
-    : [];
-
-  const temaSanitizado = {
-    resumen: '', // Ya no se solicita a Gemini para ahorrar tokens
-    palabras_clave: resultado.tema?.palabras_clave || [],
-    emocion: resultado.tema?.emocion || 'neutral'
-  };
-
-  console.log(`✅ Gemini completado en ${(Date.now() - inicio) / 1000}s`);
-  console.log(`   - Palabras: ${palabrasSanitizadas.length}`);
-  console.log(`   - Secciones: ${estructuraSanitizada.length}`);
-
-  // Mapeo a tipos internos
-  const letrasTs: TranscripcionPalabra[] = palabrasSanitizadas.map((p: any) => ({
-    palabra: p.palabra,
-    inicio_ms: p.inicio_ms,
-    fin_ms: p.fin_ms,
-  }));
-
-  const estructuraTs: EstructuraMusical[] = estructuraSanitizada.map((item: any) => ({
+  const estructuraTs: EstructuraMusical[] = estructura.map((item: any) => ({
     tipo_seccion: mapSeccionToTipo(item.seccion),
     inicio_ms: item.inicio_ms,
     fin_ms: item.fin_ms,
   }));
 
-  const eventosClaveDj: EventoClaveDJ[] = eventosSanitizados
+  const eventosClaveDj: EventoClaveDJ[] = eventosDj
     .map((evento: any) => {
       const mapped = mapEventoDJ(evento.tipo);
       if (!mapped) return null;
@@ -1311,25 +527,34 @@ IMPORTANTE: Sé rápido y preciso. Timestamps en milisegundos.`;
     })
     .filter((item: any): item is EventoClaveDJ => Boolean(item));
 
+  // Agregar loops como eventos "melodia_iconica"
+  const loopsComoEventos: EventoClaveDJ[] = loopsTransicion
+    .filter(l => l.score >= 7) // Solo loops con score alto
+    .map(l => ({
+      evento: 'melodia_iconica' as const,
+      inicio_ms: l.inicio_ms,
+      fin_ms: l.fin_ms,
+    }));
+
   const analisisContenido: AnalisisContenido = {
     analisis_lirico_tematico: {
-      tema_principal: temaSanitizado.resumen,
-      palabras_clave_semanticas: temaSanitizado.palabras_clave,
-      evolucion_emocional: temaSanitizado.emocion,
+      tema_principal: '',
+      palabras_clave_semanticas: [],
+      evolucion_emocional: 'neutral',
     },
-    eventos_clave_dj: eventosClaveDj,
+    eventos_clave_dj: [...eventosClaveDj, ...loopsComoEventos],
     diagnostico_tecnico: {
-      resumen_segmentos_voz: 'Análisis optimizado',
-      segmentos_fuera_vad: 0,
-      perfil_energia_resumen: 'Optimizado',
-      energia_promedio: params.analisisTecnico.energia,
-      energia_picos_ms: [],
-      energia_valles_ms: [],
-      huecos_resumen: 'Optimizado'
+      resumen_segmentos_voz: `${vocalesClave.length} bloques vocales detectados`,
+      huecos_resumen: `${huecos.length} zonas instrumentales`
     },
   };
 
+  // ============================================================================
+  // RETURN COMPLETO
+  // ============================================================================
+
   return {
+    id: '',
     hash_archivo: params.hash_archivo,
     titulo: params.titulo,
     bpm: params.analisisTecnico.bpm,
@@ -1343,16 +568,17 @@ IMPORTANTE: Sé rápido y preciso. Timestamps en milisegundos.`;
     beats_ts_ms: params.analisisTecnico.beats_ts_ms,
     downbeats_ts_ms: params.analisisTecnico.downbeats_ts_ms,
     frases_ts_ms: params.analisisTecnico.frases_ts_ms,
-    palabras: palabrasSanitizadas,
-    huecos_analizados: huecosSanitizados,
-    estructura: estructuraSanitizada,
-    tema: temaSanitizado,
-    eventos_dj: eventosSanitizados,
-    segmentos_voz: params.segmentosVoz,
-    perfil_energia_rms: params.perfilEnergiaRMS || [],
-    letras_ts: letrasTs,
+    cue_points: [],
+    mix_in_point: null,
+    mix_out_point: null,
+    vocales_clave: vocalesClave,
+    loops_transicion: loopsTransicion,
     estructura_ts: estructuraTs,
     analisis_contenido: analisisContenido,
+    presencia_vocal_ts: [],
+    analisis_espectral: null,
+    segmentos_voz: params.segmentosVoz,
+    huecos_analizados: huecos,
     fecha_procesado: new Date(),
-  };
+  } as CancionAnalizada;
 }

@@ -1,0 +1,21 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Fondo con esquinas redondeadas (Estilo App) -->
+  <rect x="0" y="0" width="512" height="512" rx="100" ry="100" fill="#1a1a1a"/>
+  
+  <!-- Borde del Vinilo -->
+  <circle cx="256" cy="256" r="180" fill="#2d2d2d" stroke="#00d2ff" stroke-width="15"/>
+  
+  <!-- Surcos del Vinilo -->
+  <circle cx="256" cy="256" r="140" fill="none" stroke="#3d3d3d" stroke-width="8"/>
+  <circle cx="256" cy="256" r="110" fill="none" stroke="#3d3d3d" stroke-width="8"/>
+  
+  <!-- Etiqueta Central -->
+  <circle cx="256" cy="256" r="70" fill="#ff0055"/>
+  
+  <!-- Agujero del centro -->
+  <circle cx="256" cy="256" r="15" fill="#1a1a1a"/>
+  
+  <!-- Brazo de la aguja (Estilizado) -->
+  <rect x="240" y="50" width="30" height="150" rx="10" fill="#ffffff" transform="rotate(35 256 60)"/>
+  <circle cx="360" cy="190" r="25" fill="#ffffff"/>
+</svg>

@@ -275,26 +275,28 @@ export default function Home() {
                     if (geminiResp.ok) {
                       const geminiData = await geminiResp.json();
 
-                      // 🔒 VALIDACIÓN EXHAUSTIVA de la respuesta
+                      // 🔒 VALIDACIÓN EXHAUSTIVA de la respuesta DJ-CÉNTRICA
                       const camposFaltantes: string[] = [];
-                      
+
                       if (!geminiData.gemini) {
                         camposFaltantes.push('gemini');
                       } else {
-                        if (!geminiData.gemini.estructura || !Array.isArray(geminiData.gemini.estructura) || geminiData.gemini.estructura.length === 0) {
+                        // Validar campos DJ-céntricos (NO los antiguos tema/transcripcion)
+                        if (!geminiData.gemini.estructura || !Array.isArray(geminiData.gemini.estructura)) {
                           camposFaltantes.push('estructura');
                         }
                         if (!geminiData.gemini.huecos || !Array.isArray(geminiData.gemini.huecos)) {
                           camposFaltantes.push('huecos');
                         }
-                        if (!geminiData.gemini.tema || !geminiData.gemini.tema.palabras_clave || !geminiData.gemini.tema.emocion) {
-                          camposFaltantes.push('tema completo');
+                        if (!geminiData.gemini.analisis_contenido || typeof geminiData.gemini.analisis_contenido !== 'object') {
+                          camposFaltantes.push('analisis_contenido');
                         }
-                        if (!geminiData.gemini.eventos_dj || !Array.isArray(geminiData.gemini.eventos_dj)) {
-                          camposFaltantes.push('eventos_dj');
+                        // vocales_clave y loops_transicion pueden estar vacíos (canciones instrumentales)
+                        if (!Array.isArray(geminiData.gemini.vocales_clave)) {
+                          camposFaltantes.push('vocales_clave');
                         }
-                        if (!geminiData.gemini.transcripcion || !Array.isArray(geminiData.gemini.transcripcion.palabras)) {
-                          camposFaltantes.push('transcripcion.palabras');
+                        if (!Array.isArray(geminiData.gemini.loops_transicion)) {
+                          camposFaltantes.push('loops_transicion');
                         }
                       }
 
@@ -331,11 +333,11 @@ export default function Home() {
                 } catch (error) {
                   reintentoGemini++;
                   console.warn(`   ⚠️ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Error Gemini (intento ${reintentoGemini}/${MAX_REINTENTOS_GEMINI}):`, error instanceof Error ? error.message : error);
-                  
+
                   // Si llegamos al máximo de reintentos, marcar como no pendiente para no bloquear
                   if (reintentoGemini >= MAX_REINTENTOS_GEMINI) {
                     console.error(`   ❌ [${numActual}/${tracksParaAnalizar.length}] ${track.title} - Gemini falló tras ${MAX_REINTENTOS_GEMINI} intentos`);
-                    
+
                     // 🔓 Desbloquear track aunque falle Gemini para permitir el mix
                     setTracks(prev => prev.map(t =>
                       t.hash === data.hash

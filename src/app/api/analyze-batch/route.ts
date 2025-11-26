@@ -6,7 +6,7 @@
 // ============================================================================
 
 import { NextRequest, NextResponse } from 'next/server';
-import { existeCancionPorHash } from '@/lib/db-persistence';
+import { existeCancionPorHash, obtenerCancionPorHash } from '@/lib/db-persistence';
 import { analizarAudioCompleto } from '@/lib/audio-analyzer-unified';
 import { guardarAnalisisEnDB } from '@/lib/db-persistence';
 import { obtenerRateLimiter } from '@/lib/gemini-rate-limiter';
@@ -66,7 +66,63 @@ export async function POST(request: NextRequest) {
       console.log(`[${i + 1}/${files.length}] 🎵 ${file.name}`);
 
       try {
-        // Leer archivo
+        const buffer = await file.arrayBuffer();
+        const fileBuffer = Buffer.from(buffer);
+        const hash = calcularHashBuffer(fileBuffer);
+
+        // 1. Verificar si ya existe en DB
+        const existente = await obtenerCancionPorHash(hash);
+
+        if (existente) {
+          cache++;
+          resultados.push({
+            nombre: file.name,
+            titulo: existente.titulo || file.name,
+            artista: 'Desconocido',
+            bpm: existente.bpm || 0,
+            tonalidad_camelot: existente.tonalidad_camelot || '',
+            energia: existente.energia || 0,
+            bailabilidad: existente.bailabilidad || 0,
+            hash,
+            fase: 'cache',
+            geminiPendiente: false
+          });
+        } else {
+          // 2. Análisis Essentia (FASE 1)
+          // OPTIMIZACIÓN: Desactivamos VAD, Spectral y Loudness detallado para acelerar.
+          const analisis = await analizarAudioCompleto(fileBuffer, {
+            disable: { vocal: true, spectral: true, loudness_detailed: true }
+          });
+
+          // 3. Guardar en DB
+          await guardarAnalisisEnDB({
+            hash,
+            titulo: file.name.replace(/\.[^/.]+$/, ''),
+            analisis
+          });
+
+          analizados++;
+
+          resultados.push({
+            nombre: file.name,
+            titulo: file.name,
+            artista: 'Desconocido',
+            bpm: analisis.bpm,
+            tonalidad_camelot: analisis.tonalidad_camelot,
+            energia: analisis.energia,
+            bailabilidad: analisis.bailabilidad,
+            hash,
+            fase: 'essentia',
+            geminiPendiente: true
+          });
+
+          // 4. Encolar para Gemini (FASE 2)
+          tareasGemini.push({
+            hash,
+            buffer: fileBuffer,
+            analisis
+          });
+        }
       } catch (error: any) {
         console.error(`   ❌ Error:`, error.message);
 
@@ -114,7 +170,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Retornar inmediatamente (canciones ya están en DB con Essentia)
+    // Retornar inmediatamente
     return NextResponse.json({
       success: true,
       fase1Completada: true,
@@ -196,7 +252,8 @@ async function procesarCancionConGemini(
     const { actualizarDatosGemini } = await import('@/lib/db-persistence');
     await actualizarDatosGemini({
       hash: tarea.hash,
-      letras_ts: datosGemini.letras_ts,
+      vocales_clave: datosGemini.vocales_clave,
+      loops_transicion: datosGemini.loops_transicion,
       estructura_ts: datosGemini.estructura_ts,
       analisis_contenido: datosGemini.analisis_contenido,
       segmentos_voz: datosGemini.segmentos_voz,
