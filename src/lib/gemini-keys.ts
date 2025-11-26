@@ -32,7 +32,7 @@ export function getGeminiApiKeys(): string[] {
   return Array.from(keys);
 }
 
-export const MAX_CONCURRENT_REQUESTS_PER_KEY = 5;
+export const MAX_CONCURRENT_REQUESTS_PER_KEY = 3;
 export const MAX_REQUESTS_PER_MINUTE_PER_KEY = 50;
 
 export function getMaxParallelCapacity(keysCount: number): number {

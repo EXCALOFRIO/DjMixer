@@ -44,10 +44,10 @@ interface AStarState {
 function calculateHarmonicScore(trackA: CancionAnalizada, trackB: CancionAnalizada): number {
   const kA = trackA.tonalidad_camelot;
   const kB = trackB.tonalidad_camelot;
-  
+
   if (!kA || !kB) return 50;
   if (kA === kB) return 100;
-  
+
   // Lógica simplificada de Camelot
   const numA = parseInt(kA);
   const numB = parseInt(kB);
@@ -59,10 +59,10 @@ function calculateHarmonicScore(trackA: CancionAnalizada, trackB: CancionAnaliza
   // Adyacentes (+/- 1) o cambio de modo (misma letra o mismo numero diff letra)
   const diffNum = Math.abs(numA - numB);
   const isAdjacent = diffNum === 1 || diffNum === 11; // 12 vs 1
-  
+
   if (isAdjacent && letterA === letterB) return 90;
   if (numA === numB && letterA !== letterB) return 80;
-  
+
   // Energy boost (+2 semitonos, ej 1A -> 3A)
   if ((numB - numA === 2 || numB - numA === -10) && letterA === letterB) return 70;
 
@@ -75,18 +75,18 @@ function calculateHarmonicScore(trackA: CancionAnalizada, trackB: CancionAnaliza
 function calculateBPMScore(bpmA: number | null, bpmB: number | null): number {
   if (!bpmA || !bpmB) return 50;
   const diffPercent = (bpmB - bpmA) / bpmA; // % de cambio (positivo si sube)
-  
+
   // Rango perfecto: +0% a +4% (Subir energía ligeramente es mejor)
   if (diffPercent >= 0 && diffPercent <= 0.04) return 100;
   // Rango bueno: -2% a 0% (Mantener o bajar muy poco)
   if (diffPercent >= -0.02 && diffPercent < 0) return 90;
-  
+
   // Rango aceptable (valor absoluto)
   const absDiff = Math.abs(diffPercent);
-  if (absDiff <= 0.08) return 60; 
-  
+  if (absDiff <= 0.08) return 60;
+
   // Cambio drástico (>8%)
-  return 20; 
+  return 20;
 }
 
 /**
@@ -95,13 +95,13 @@ function calculateBPMScore(bpmA: number | null, bpmB: number | null): number {
 function calculateEnergyScore(eA?: number | null, eB?: number | null): number {
   if (eA === undefined || eA === null || eB === undefined || eB === null) return 50;
   const diff = eB - eA; // Si sube es positivo
-  
+
   if (Math.abs(diff) < 0.1) return 100; // Maintain
   if (diff > 0 && diff < 0.3) return 90; // Build up suave
   if (diff < 0 && diff > -0.2) return 80; // Cool down suave
   if (diff > 0.4) return 40; // Subidón muy brusco
   if (diff < -0.4) return 30; // Bajón de energía (mata pista)
-  
+
   return 60;
 }
 
@@ -114,39 +114,53 @@ export function calculateTransitionScore(
   mixPlanA: MixPlanEntry,
   mixPlanB: MixPlanEntry
 ): { score: number; transition: TransitionResult | null } {
-  
+
   // 1. BPM Score (Con tolerancia)
   const bpmScore = calculateBPMScore(trackA.bpm, trackB.bpm);
-  
+
   // 2. Harmonic Score
   const harmonicScore = calculateHarmonicScore(trackA, trackB);
-  
-  // 3. Energy Score
-  const energyScore = calculateEnergyScore(trackA.energia, trackB.energia);
+
+  // 3. Energy Flow (Nuevo factor "Narrativa")
+  const energyDiff = (trackB.energia || 0.5) - (trackA.energia || 0.5);
+  let energyScore = 50;
+
+  // Escenario: BUILD UP (Subiendo intensidad)
+  // Ideal: Subir un poco (0.05 - 0.15)
+  if (energyDiff > 0.05 && energyDiff <= 0.2) energyScore = 100;
+
+  // Escenario: MAINTAIN (Mantener la pista caliente)
+  else if (Math.abs(energyDiff) <= 0.05) energyScore = 85;
+
+  // Escenario: RESET/BREAK (Bajón intencional para descansar)
+  // Solo válido si venimos de energía muy alta (>0.8)
+  else if ((trackA.energia || 0) > 0.8 && energyDiff < -0.3) energyScore = 80;
+
+  // Escenario: KILLER (Bajón sin sentido)
+  else if ((trackA.energia || 0) < 0.6 && energyDiff < -0.2) energyScore = 20;
 
   // 4. Mix Transition Score (Usando la nueva lógica de estrategias)
   const mixResult = findBestTransition(trackA, mixPlanA.bestExitPoints, trackB, mixPlanB.bestEntryPoints);
-  
+
   // Si findBestTransition devuelve null (raro con el fallback), penalizar pero no morir
   const mixScore = mixResult ? mixResult.score : 0;
 
   // God-mode guard: si vamos a hacer DROP_SWAP doble y la armonía es mala, penalizamos duro
   if (
-    mixResult && 
-    mixResult.exitPoint.strategy === 'DROP_SWAP' && 
-    mixResult.entryPoint.strategy === 'DROP_SWAP' && 
+    mixResult &&
+    mixResult.exitPoint.strategy === 'DROP_SWAP' &&
+    mixResult.entryPoint.strategy === 'DROP_SWAP' &&
     harmonicScore < DROP_SWAP_HARMONIC_THRESHOLD
   ) {
     return { score: DROP_SWAP_HARMONIC_PENALIZED_SCORE, transition: mixResult };
   }
 
-  // Ponderación
-  // Ponderación
-  const total = 
-    (bpmScore * W_BPM) +
-    (harmonicScore * W_TONALIDAD) +
-    (energyScore * W_ENERGIA) +
-    (mixScore * W_MEZCLA);
+  // Ponderación Final Reajustada para PRIORIZAR LA MEZCLA
+  const total =
+    (bpmScore * 0.20) +
+    (harmonicScore * 0.20) +
+    (energyScore * 0.15) +
+    (mixScore * 0.45); // ¡La calidad de la mezcla pesa casi la mitad!
 
   return { score: Math.round(total), transition: mixResult };
 }
@@ -161,18 +175,18 @@ export function findOptimalSequence(
   startTrackId?: string
 ): MixSession {
   console.log(`🎯 Iniciando A* con ${tracks.length} canciones, longitud objetivo: ${sessionLength}`);
-  
+
   // Validación básica
   if (tracks.length === 0) {
     return { tracks: [], totalScore: 0, avgTransitionScore: 0, warnings: ['No hay tracks'] };
   }
-  
+
   // Asegurar que sessionLength no sea mayor que los tracks disponibles
   const targetLength = Math.min(sessionLength, tracks.length);
 
   // Seleccionar track inicial
-  const startTrack = startTrackId 
-    ? tracks.find(t => t.id === startTrackId) 
+  const startTrack = startTrackId
+    ? tracks.find(t => t.id === startTrackId)
     : tracks[0];
 
   if (!startTrack) {
@@ -200,7 +214,7 @@ export function findOptimalSequence(
 
   while (openSet.length > 0 && iterations < MAX_ITERATIONS) {
     iterations++;
-    
+
     // Ordenar para sacar el mejor candidato (menor costo fScore)
     openSet.sort((a, b) => a.fScore - b.fScore);
     const { state: currentState } = openSet.shift()!;
@@ -245,10 +259,10 @@ export function findOptimalSequence(
           transitionData.score -= VARIETY_PENALTY_STRATEGY;
         }
       }
-      
+
       // FILTRO RELAJADO: Solo descartar si el score es extremadamente bajo (< 5)
       // Antes devolvía -1 y mataba la rama. Ahora permitimos transiciones "malas" pero costosas.
-      if (transitionData.score < 5) continue; 
+      if (transitionData.score < 5) continue;
 
       const cost = 100 - transitionData.score;
       const newGScore = currentState.gScore + cost;
@@ -256,7 +270,7 @@ export function findOptimalSequence(
       // Heurística simple: Cuantos más tracks falten, más "costo base" estimamos
       const remaining = targetLength - (currentState.path.length + 1);
       const heuristic = remaining * 10; // Asumimos un costo mínimo de 10 por transición futura
-      
+
       const newState: AStarState = {
         currentTrackId: nextTrack.id,
         usedTrackIds: new Set(currentState.usedTrackIds).add(nextTrack.id),

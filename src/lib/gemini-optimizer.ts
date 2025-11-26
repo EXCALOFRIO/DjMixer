@@ -34,9 +34,49 @@ function msToSec(ms: number): number {
   return Math.round(ms / 10) / 100;
 }
 
-/** Convierte segundos a ms enteros (1.5s -> 1500ms) */
+/** Convierte segundos a ms enter os (1.5s -> 1500ms) */
 function secToMs(sec: number): number {
   return Math.round(sec * 1000);
+}
+
+/**
+ * CLASIFICADOR DE DENSIDAD VOCAL (Exported for mix-planner and mix-transitions)
+ * Distingue entre un Verso real (canto fluido) y efectos vocales/chanteos (gritos, "pla pla pla").
+ */
+export function clasificarTipoVocal(inicioMs: number, finMs: number, vad: SegmentoVoz[]): 'verso_denso' | 'chanteo_esporadico' | 'silencio' {
+  const duracionTotal = finMs - inicioMs;
+  if (duracionTotal <= 0) return 'silencio';
+
+  const segmentosEnBloque = vad.filter(v =>
+    (v.end_ms > inicioMs) && (v.start_ms < finMs)
+  );
+
+  if (segmentosEnBloque.length === 0) return 'silencio';
+
+  let tiempoVozReal = 0;
+  segmentosEnBloque.forEach(v => {
+    const s = Math.max(inicioMs, v.start_ms);
+    const e = Math.min(finMs, v.end_ms);
+    if (e > s) tiempoVozReal += (e - s);
+  });
+
+  const porcentajeCobertura = tiempoVozReal / duracionTotal;
+
+  let maxGap = 0;
+  const segsOrdenados = [...segmentosEnBloque].sort((a, b) => a.start_ms - b.start_ms);
+
+  for (let i = 0; i < segsOrdenados.length - 1; i++) {
+    const finActual = Math.min(finMs, segsOrdenados[i].end_ms);
+    const inicioSiguiente = Math.max(inicioMs, segsOrdenados[i + 1].start_ms);
+    const gap = inicioSiguiente - finActual;
+    if (gap > maxGap) maxGap = gap;
+  }
+
+  if (porcentajeCobertura < 0.30 && maxGap > 1200) {
+    return 'chanteo_esporadico';
+  }
+
+  return 'verso_denso';
 }
 
 /**

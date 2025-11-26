@@ -1091,74 +1091,87 @@ async function analizarEstructura(
   duracionMs: number
 ): Promise<AnalisisCompleto['estructura']> {
   try {
-    const segmentos: { inicio_ms: number; fin_ms: number; tipo: string }[] = [];
-
-    // Detección básica de segmentos usando energy
-    const frameSize = Math.floor(signal.sampleRate * 2); // 2 segundos
+    // 1. Calcular perfil de energía (RMS) suavizado
+    const frameSize = 4096;
+    const hopSize = 2048; // 50% overlap
     const audioArray = signal.array;
+    const energyProfile: number[] = [];
 
-    for (let i = 0; i < audioArray.length; i += frameSize) {
-      const frame = audioArray.slice(i, i + frameSize);
-      let energy = 0;
-      for (let j = 0; j < frame.length; j++) {
-        energy += frame[j] * frame[j];
+    // Cálculo rápido de RMS por ventanas
+    for (let i = 0; i < audioArray.length; i += hopSize) {
+      let sum = 0;
+      const end = Math.min(i + frameSize, audioArray.length);
+      for (let j = i; j < end; j++) {
+        sum += audioArray[j] * audioArray[j];
       }
-      energy = energy / frame.length;
+      energyProfile.push(Math.sqrt(sum / (end - i)));
+    }
 
-      const inicioMs = Math.round((i / signal.sampleRate) * 1000);
-      const finMs = Math.min(Math.round(((i + frameSize) / signal.sampleRate) * 1000), duracionMs);
+    // Calcular media de energía de toda la pista
+    const avgEnergy = energyProfile.reduce((a, b) => a + b, 0) / energyProfile.length;
+    // Umbral para considerar algo "High Energy" (Drop/Estribillo)
+    const highEnergyThreshold = avgEnergy * 1.3;
+    // Umbral para "Low Energy" (Breakdown/Intro)
+    const lowEnergyThreshold = avgEnergy * 0.6;
 
-      // Clasificar segmento basado en energía
+    const segmentos: { inicio_ms: number; fin_ms: number; tipo: string }[] = [];
+    const windowSecs = 5; // Analizar bloques de 5 segundos
+    const framesPerWindow = Math.floor((windowSecs * signal.sampleRate) / hopSize);
+
+    for (let i = 0; i < energyProfile.length; i += framesPerWindow) {
+      const chunk = energyProfile.slice(i, i + framesPerWindow);
+      if (chunk.length === 0) break;
+
+      const chunkAvg = chunk.reduce((a, b) => a + b, 0) / chunk.length;
+
+      const inicioMs = Math.round((i * hopSize / signal.sampleRate) * 1000);
+      const finMs = Math.min(Math.round(((i + framesPerWindow) * hopSize / signal.sampleRate) * 1000), duracionMs);
+
       let tipo = 'normal';
-      if (energy < 0.01) {
-        tipo = 'silencio';
-      } else if (energy > 0.1) {
-        tipo = 'intenso';
-      }
+      if (chunkAvg > highEnergyThreshold) tipo = 'intenso'; // Drop candidte
+      else if (chunkAvg < lowEnergyThreshold) tipo = 'suave'; // Breakdown candidate
 
       segmentos.push({ inicio_ms: inicioMs, fin_ms: finMs, tipo });
     }
 
-    // Estimar intro y outro
+    // Simplificar segmentos contiguos iguales
+    const segmentosFusionados: typeof segmentos = [];
+    if (segmentos.length > 0) {
+      let actual = segmentos[0];
+      for (let i = 1; i < segmentos.length; i++) {
+        if (segmentos[i].tipo === actual.tipo) {
+          actual.fin_ms = segmentos[i].fin_ms;
+        } else {
+          segmentosFusionados.push(actual);
+          actual = segmentos[i];
+        }
+      }
+      segmentosFusionados.push(actual);
+    }
+
+    // Detección de Intro/Outro basada en los primeros/últimos segmentos "suaves"
     let introDuration = 0;
+    if (segmentosFusionados.length > 0 && segmentosFusionados[0].tipo === 'suave') {
+      introDuration = segmentosFusionados[0].fin_ms;
+    }
+
     let outroDuration = 0;
-
-    for (let i = 0; i < segmentos.length && i < 5; i++) {
-      if (segmentos[i].tipo !== 'intenso') {
-        introDuration = segmentos[i].fin_ms;
-      } else {
-        break;
-      }
+    const ultimo = segmentosFusionados[segmentosFusionados.length - 1];
+    if (ultimo && ultimo.tipo === 'suave') {
+      outroDuration = duracionMs - ultimo.inicio_ms;
     }
-
-    for (let i = segmentos.length - 1; i >= 0 && i >= segmentos.length - 5; i--) {
-      if (segmentos[i].tipo !== 'intenso') {
-        outroDuration = duracionMs - segmentos[i].inicio_ms;
-      } else {
-        break;
-      }
-    }
-
-    // Fade in/out (aproximación)
-    const fadeInDuration = Math.min(introDuration, 8000); // Max 8 segundos
-    const fadeOutDuration = Math.min(outroDuration, 8000);
 
     return {
-      segmentos: segmentos.slice(0, 50), // Limitar a 50 segmentos
+      segmentos: segmentosFusionados,
       intro_duration_ms: introDuration,
       outro_duration_ms: outroDuration,
-      fade_in_duration_ms: fadeInDuration,
-      fade_out_duration_ms: fadeOutDuration,
+      fade_in_duration_ms: Math.min(introDuration, 8000),
+      fade_out_duration_ms: Math.min(outroDuration, 8000),
     };
+
   } catch (error) {
     console.warn('Error en análisis de estructura:', error);
-    return {
-      segmentos: [],
-      intro_duration_ms: 0,
-      outro_duration_ms: 0,
-      fade_in_duration_ms: 0,
-      fade_out_duration_ms: 0,
-    };
+    return { segmentos: [], intro_duration_ms: 0, outro_duration_ms: 0, fade_in_duration_ms: 0, fade_out_duration_ms: 0 };
   }
 }
 
