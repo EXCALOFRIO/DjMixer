@@ -107,24 +107,23 @@ export interface AnalisisCompleto {
     fade_out_duration_ms: number;
   };
 
-  // Datos complementarios para análisis posterior
-  segmentos_voz: Array<{ start_ms: number; end_ms: number }>; // Segmentos VAD
+  // NO HAY datos complementarios - segmentos_voz eliminado
 }
 
-// Opciones de análisis para permitir ejecución en batch y Node puro
+// Opciones de análisis
 export interface AnalisisConfig {
-  // Normalización del audio (aprox -14 LUFS usando RMS como proxy)
   normalize?: boolean | { targetLUFS?: number };
-  // Desactivar módulos para acelerar
   disable?: {
     vocal?: boolean;
     tonalidad?: boolean;
     djCues?: boolean;
-    bpm?: boolean; // si true, se usa heurística simple en vez de Essentia
-    spectral?: boolean; // Disable spectral analysis
-    loudness_detailed?: boolean; // Disable detailed loudness (EBU R128)
+    bpm?: boolean;
+    spectral?: boolean;
+    loudness_detailed?: boolean;
   };
-  // Habilita configuraciones internas extra rápidas (omite análisis secundarios)
+  enable?: {
+    vocal?: boolean; // Opt-in para VAD (desactivado por defecto)
+  };
   fast?: boolean;
 }
 
@@ -2675,9 +2674,16 @@ export async function analizarAudioCompleto(buffer: Buffer, config: AnalisisConf
     tiempos['Análisis Avanzados'] = 0;
   }
 
-  // Detectar segmentos de voz (VAD básico)
+  // ============================================================================
+  // VAD (Voice Activity Detection) - DESACTIVADO
+  // ============================================================================
+  // Gemini ahora detecta voz directamente del audio con mayor precisión.
+  // Esto ahorra ~201ms de procesamiento sin pérdida de calidad.
+
   let segmentosVoz: Array<{ start_ms: number; end_ms: number }> = [];
-  if (!config.disable?.vocal) {
+
+  // Solo ejecutar VAD si está explícitamente habilitado en config
+  if (config.enable?.vocal) {
     const t10 = Date.now();
     console.log('🎬 Detectando segmentos de voz (VAD)...');
     segmentosVoz = detectarSegmentosVozBasico(audioData, sampleRate);
@@ -2718,7 +2724,5 @@ export async function analizarAudioCompleto(buffer: Buffer, config: AnalisisConf
     tonal_avanzado: tonalAvanzado,
     loudness,
     estructura,
-    // Datos para análisis adicional
-    segmentos_voz: segmentosVoz,
   };
 }

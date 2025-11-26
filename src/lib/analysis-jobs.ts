@@ -4,12 +4,13 @@
  */
 
 import { sql } from './db';
+import { randomUUID } from 'crypto';
 
 export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
 export interface AnalysisJob {
   id: string;
-  hash: string;
+  hash_archivo: string;
   status: JobStatus;
   progress: number; // 0-100
   current_step?: string;
@@ -26,18 +27,20 @@ export interface AnalysisJob {
 export async function crearJobAnalisis(hash: string): Promise<string> {
   if (!sql) throw new Error('SQL client no disponible');
 
+  const newId = randomUUID();
+
   const resultado = await sql`
     INSERT INTO analysis_jobs (
-      id, hash, status, progress, created_at, updated_at
+      id, hash_archivo, status, progress, created_at, updated_at
     ) VALUES (
-      ${hash},
+      ${newId},
       ${hash},
       'pending',
       0,
       NOW(),
       NOW()
     )
-    ON CONFLICT (id) 
+    ON CONFLICT (hash_archivo) 
     DO UPDATE SET
       status = 'pending',
       progress = 0,
@@ -69,7 +72,7 @@ export async function obtenerUltimoJobPorHash(hash: string): Promise<AnalysisJob
 
   const resultado = await sql`
     SELECT * FROM analysis_jobs 
-    WHERE hash = ${hash}
+    WHERE hash_archivo = ${hash}
     ORDER BY created_at DESC
     LIMIT 1
   `;
@@ -78,81 +81,138 @@ export async function obtenerUltimoJobPorHash(hash: string): Promise<AnalysisJob
 }
 
 /**
- * Actualiza el progreso de un job
+ * Actualiza el progreso de un job (por ID o hash)
  */
 export async function actualizarProgresoJob(
-  jobId: string,
+  jobIdOrHash: string,
   progress: number,
   currentStep?: string
 ): Promise<void> {
   if (!sql) throw new Error('SQL client no disponible');
 
-  await sql`
-    UPDATE analysis_jobs 
-    SET 
-      progress = ${Math.min(100, Math.max(0, progress))},
-      current_step = ${currentStep || null},
-      updated_at = NOW()
-    WHERE id = ${jobId}
-  `;
+  // Detectar si es UUID (con guiones) o hash (64 caracteres hex)
+  const isUUID = jobIdOrHash.includes('-');
+
+  if (isUUID) {
+    await sql`
+      UPDATE analysis_jobs 
+      SET 
+        progress = ${Math.min(100, Math.max(0, progress))},
+        current_step = ${currentStep || null},
+        updated_at = NOW()
+      WHERE id = ${jobIdOrHash}
+    `;
+  } else {
+    await sql`
+      UPDATE analysis_jobs 
+      SET 
+        progress = ${Math.min(100, Math.max(0, progress))},
+        current_step = ${currentStep || null},
+        updated_at = NOW()
+      WHERE hash_archivo = ${jobIdOrHash}
+    `;
+  }
 }
 
 /**
- * Marca un job como en proceso
+ * Marca un job como en proceso (por ID o hash)
  */
-export async function marcarJobEnProceso(jobId: string): Promise<void> {
+export async function marcarJobEnProceso(jobIdOrHash: string): Promise<void> {
   if (!sql) throw new Error('SQL client no disponible');
 
-  await sql`
-    UPDATE analysis_jobs 
-    SET 
-      status = 'processing',
-      progress = 5,
-      current_step = 'Iniciando análisis...',
-      updated_at = NOW()
-    WHERE id = ${jobId}
-  `;
+  const isUUID = jobIdOrHash.includes('-');
+
+  if (isUUID) {
+    await sql`
+      UPDATE analysis_jobs 
+      SET 
+        status = 'processing',
+        progress = 5,
+        current_step = 'Iniciando análisis...',
+        updated_at = NOW()
+      WHERE id = ${jobIdOrHash}
+    `;
+  } else {
+    await sql`
+      UPDATE analysis_jobs 
+      SET 
+        status = 'processing',
+        progress = 5,
+        current_step = 'Iniciando análisis...',
+        updated_at = NOW()
+      WHERE hash_archivo = ${jobIdOrHash}
+    `;
+  }
 }
 
 /**
- * Marca un job como completado
+ * Marca un job como completado (por ID o hash)
  */
 export async function marcarJobCompletado(
-  jobId: string,
+  jobIdOrHash: string,
   result?: any
 ): Promise<void> {
   if (!sql) throw new Error('SQL client no disponible');
 
-  await sql`
-    UPDATE analysis_jobs 
-    SET 
-      status = 'completed',
-      progress = 100,
-      current_step = 'Completado',
-      result = ${result ? JSON.stringify(result) : null},
-      completed_at = NOW(),
-      updated_at = NOW()
-    WHERE id = ${jobId}
-  `;
+  const isUUID = jobIdOrHash.includes('-');
+
+  if (isUUID) {
+    await sql`
+      UPDATE analysis_jobs 
+      SET 
+        status = 'completed',
+        progress = 100,
+        current_step = 'Completado',
+        result = ${result ? JSON.stringify(result) : null},
+        completed_at = NOW(),
+        updated_at = NOW()
+      WHERE id = ${jobIdOrHash}
+    `;
+  } else {
+    await sql`
+      UPDATE analysis_jobs 
+      SET 
+        status = 'completed',
+        progress = 100,
+        current_step = 'Completado',
+        result = ${result ? JSON.stringify(result) : null},
+        completed_at = NOW(),
+        updated_at = NOW()
+      WHERE hash_archivo = ${jobIdOrHash}
+    `;
+  }
 }
 
 /**
- * Marca un job como fallido
+ * Marca un job como fallido (por ID o hash)
  */
 export async function marcarJobFallido(
-  jobId: string,
+  jobIdOrHash: string,
   errorMessage: string
 ): Promise<void> {
   if (!sql) throw new Error('SQL client no disponible');
 
-  await sql`
-    UPDATE analysis_jobs 
-    SET 
-      status = 'failed',
-      error_message = ${errorMessage},
-      updated_at = NOW()
-    WHERE id = ${jobId}
-  `;
+  const isUUID = jobIdOrHash.includes('-');
+
+  if (isUUID) {
+    await sql`
+      UPDATE analysis_jobs 
+      SET 
+        status = 'failed',
+        error_message = ${errorMessage},
+        updated_at = NOW()
+      WHERE id = ${jobIdOrHash}
+    `;
+  } else {
+    await sql`
+      UPDATE analysis_jobs 
+      SET 
+        status = 'failed',
+        error_message = ${errorMessage},
+        updated_at = NOW()
+      WHERE hash_archivo = ${jobIdOrHash}
+    `;
+  }
 }
 
 /**

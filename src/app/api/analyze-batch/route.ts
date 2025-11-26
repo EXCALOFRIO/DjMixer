@@ -25,7 +25,6 @@ interface ResultadoProcesamiento {
   artista: string;
   bpm: number;
   tonalidad_camelot: string;
-  energia: number;
   bailabilidad: number;
   hash: string;
   fase: 'cache' | 'essentia' | 'error';
@@ -81,7 +80,6 @@ export async function POST(request: NextRequest) {
             artista: 'Desconocido',
             bpm: existente.bpm || 0,
             tonalidad_camelot: existente.tonalidad_camelot || '',
-            energia: existente.energia || 0,
             bailabilidad: existente.bailabilidad || 0,
             hash,
             fase: 'cache',
@@ -109,7 +107,6 @@ export async function POST(request: NextRequest) {
             artista: 'Desconocido',
             bpm: analisis.bpm,
             tonalidad_camelot: analisis.tonalidad_camelot,
-            energia: analisis.energia,
             bailabilidad: analisis.bailabilidad,
             hash,
             fase: 'essentia',
@@ -132,7 +129,6 @@ export async function POST(request: NextRequest) {
           artista: 'Error',
           bpm: 0,
           tonalidad_camelot: '',
-          energia: 0,
           bailabilidad: 0,
           hash: '',
           fase: 'error',
@@ -255,8 +251,6 @@ async function procesarCancionConGemini(
       vocales_clave: datosGemini.vocales_clave,
       loops_transicion: datosGemini.loops_transicion,
       estructura_ts: datosGemini.estructura_ts,
-      analisis_contenido: datosGemini.analisis_contenido,
-      segmentos_voz: datosGemini.segmentos_voz,
       huecos_analizados: datosGemini.huecos_analizados,
     });
 

@@ -24,7 +24,7 @@ export function findBestTransition(
   let bestResult: TransitionResult | null = null;
   let bestScore = -1;
 
-  // OPTIMIZACIÓN: Pre-filtrado inteligente
+  //OPTIMIZACIÓN: Pre-filtrado inteligente
   // Si Track A sale con voz, solo buscamos entradas instrumentales en Track B
   // const exitHasVocal = exitPoints.filter(e => e.vocalType === 'MELODIC_VOCAL');
 
@@ -115,8 +115,8 @@ function simulateMixTimeline(
 
     // Obtener estado vocal
     // Si está en loop, forzamos el estado del punto de loop (seguro)
-    const vocalA = isLoopingA ? exit.vocalType : getVocalStateAt(pointA, trackA.segmentos_voz || []);
-    const vocalB = getVocalStateAt(pointB, trackB.segmentos_voz || []);
+    const vocalA = isLoopingA ? exit.vocalType : getVocalStateAt(pointA, []);
+    const vocalB = getVocalStateAt(pointB, []);
 
     // 1. CHOQUE DE VOCES (Regla de Oro)
     if (vocalA === 'MELODIC_VOCAL' && vocalB === 'MELODIC_VOCAL') {
@@ -140,8 +140,8 @@ function simulateMixTimeline(
     if (!isLoopingA) {
       const nextPointA = pointA + (barMs * 4);
       const nextPointB = pointB + (barMs * 4);
-      const nextVocalA = getVocalStateAt(nextPointA, trackA.segmentos_voz || []);
-      const nextVocalB = getVocalStateAt(nextPointB, trackB.segmentos_voz || []);
+      const nextVocalA = getVocalStateAt(nextPointA, []);
+      const nextVocalB = getVocalStateAt(nextPointB, []);
 
       if (vocalA === 'MELODIC_VOCAL' && nextVocalA === 'NONE' && nextVocalB === 'MELODIC_VOCAL') {
         flowBonus += 25; // ¡MAGIA! Relevo perfecto de voces

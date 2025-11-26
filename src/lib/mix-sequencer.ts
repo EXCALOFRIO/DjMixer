@@ -9,8 +9,7 @@ import { findBestTransition, type TransitionResult } from './mix-transitions';
 // Pesos ajustados para dar flexibilidad
 const W_TONALIDAD = 0.30;
 const W_BPM = 0.30;
-const W_ENERGIA = 0.10;
-const W_MEZCLA = 0.30;
+const W_MEZCLA = 0.40;
 // Valores configurables
 const VARIETY_PENALTY_TYPE = 25; // Penalización por repetir el mismo tipo de transición
 const VARIETY_PENALTY_STRATEGY = 15; // Penalización por repetir misma estrategia de salida
@@ -121,23 +120,8 @@ export function calculateTransitionScore(
   // 2. Harmonic Score
   const harmonicScore = calculateHarmonicScore(trackA, trackB);
 
-  // 3. Energy Flow (Nuevo factor "Narrativa")
-  const energyDiff = (trackB.energia || 0.5) - (trackA.energia || 0.5);
-  let energyScore = 50;
-
-  // Escenario: BUILD UP (Subiendo intensidad)
-  // Ideal: Subir un poco (0.05 - 0.15)
-  if (energyDiff > 0.05 && energyDiff <= 0.2) energyScore = 100;
-
-  // Escenario: MAINTAIN (Mantener la pista caliente)
-  else if (Math.abs(energyDiff) <= 0.05) energyScore = 85;
-
-  // Escenario: RESET/BREAK (Bajón intencional para descansar)
-  // Solo válido si venimos de energía muy alta (>0.8)
-  else if ((trackA.energia || 0) > 0.8 && energyDiff < -0.3) energyScore = 80;
-
-  // Escenario: KILLER (Bajón sin sentido)
-  else if ((trackA.energia || 0) < 0.6 && energyDiff < -0.2) energyScore = 20;
+  // 3. Energy Flow (DESACTIVADO - Campo eliminado)
+  const energyScore = 50;
 
   // 4. Mix Transition Score (Usando la nueva lógica de estrategias)
   const mixResult = findBestTransition(trackA, mixPlanA.bestExitPoints, trackB, mixPlanB.bestEntryPoints);
@@ -157,10 +141,9 @@ export function calculateTransitionScore(
 
   // Ponderación Final Reajustada para PRIORIZAR LA MEZCLA
   const total =
-    (bpmScore * 0.20) +
-    (harmonicScore * 0.20) +
-    (energyScore * 0.15) +
-    (mixScore * 0.45); // ¡La calidad de la mezcla pesa casi la mitad!
+    (bpmScore * 0.25) +
+    (harmonicScore * 0.25) +
+    (mixScore * 0.50); // Rebalanceado sin energía
 
   return { score: Math.round(total), transition: mixResult };
 }

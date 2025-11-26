@@ -83,9 +83,9 @@ export async function POST(request: NextRequest) {
     const existente = await obtenerCancionPorHash(hash);
     if (existente) {
       // Verificar si el análisis de Gemini está incompleto
-      // Buscamos el placeholder "Pendiente" que se inserta cuando no hay datos de Gemini
-      let geminiIncompleto = !existente.analisis_contenido ||
-        (existente.analisis_contenido as any).analisis_lirico_tematico?.tema_principal === 'Pendiente';
+      // Gemini está completo si tiene estructura_ts y vocales_clave
+      let geminiIncompleto = !existente.estructura_ts ||
+        existente.estructura_ts.length === 0;
 
       // Verificar también la tabla de jobs (para mayor seguridad)
       if (!geminiIncompleto) {

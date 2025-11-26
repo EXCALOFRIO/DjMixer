@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
-import { normalizeCancionRow } from '@/lib/db-normalize';
+import { normalizeCancionFromDB } from '@/lib/db-normalize';
 import { buildMixPlan } from '@/lib/mix-planner';
 import { findOptimalSequence } from '@/lib/mix-sequencer';
 import type { CancionAnalizada } from '@/lib/db';
@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Normalizar datos de BD
-    const tracks = rows.map(normalizeCancionRow);
+    const tracks = rows.map(normalizeCancionFromDB);
 
     // 1. Generar plan de mix (puntos de entrada/salida para cada canción)
     console.log('📊 Generando plan de mix...');
@@ -120,7 +120,6 @@ export async function POST(request: NextRequest) {
               title: st.track.titulo,
               bpm: st.track.bpm,
               key: st.track.tonalidad_camelot,
-              energy: st.track.energia,
               durationMs: st.track.duracion_ms,
             },
             transition,

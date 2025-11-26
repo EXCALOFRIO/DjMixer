@@ -1,11 +1,10 @@
 import type {
   CancionAnalizada,
-  SegmentoVoz,
   HuecoInstrumental,
-  EventoClaveDJ,
-  EstructuraMusical
+  EstructuraMusical,
+  LoopTransicion
 } from './db';
-import { clasificarTipoVocal } from './gemini-optimizer';
+import { clasificarTipoVocal, parseTimeStringToMs } from './gemini-optimizer';
 import type {
   CuePoint,
   CueStrategy,
@@ -23,6 +22,19 @@ export interface MixPlanEntry {
   durationMs: number;
   bestEntryPoints: CuePoint[];
   bestExitPoints: CuePoint[];
+}
+
+// Local types with MS for calculations
+interface HuecoWithMs {
+  inicio_ms: number;
+  fin_ms: number;
+  tipo: 'instrumental_puro' | 'voz_principal_residuo';
+}
+
+interface EstructuraWithMs {
+  tipo_seccion: EstructuraMusical['tipo_seccion'];
+  inicio_ms: number;
+  fin_ms: number;
 }
 
 // Configuración de pesos
@@ -44,10 +56,22 @@ const MIN_EXIT_POSITION = 0.6; // 60% de la canción
 export function buildMixPlan(tracks: CancionAnalizada[]): MixPlanEntry[] {
   return tracks.map(track => {
     // Normalizar datos si vienen como strings JSON del CSV
-    const huecos = normalizeArray<HuecoInstrumental>(track.huecos_analizados);
-    const voces = normalizeArray<SegmentoVoz>(track.segmentos_voz);
-    const eventos = normalizeEventos(track.analisis_contenido?.eventos_clave_dj);
-    const estructura = normalizeEstructura(track.estructura_ts);
+    // Normalizar datos si vienen como strings JSON del CSV
+    const huecosRaw = normalizeArray<HuecoInstrumental>(track.huecos_analizados);
+    const huecos: HuecoWithMs[] = huecosRaw.map(h => ({
+      ...h,
+      inicio_ms: parseTimeStringToMs(h.inicio),
+      fin_ms: parseTimeStringToMs(h.fin)
+    }));
+
+    const voces: Array<{ start_ms: number; end_ms: number }> = [];
+
+    const estructuraRaw = normalizeEstructura(track.estructura_ts);
+    const estructura: EstructuraWithMs[] = estructuraRaw.map(s => ({
+      tipo_seccion: s.tipo_seccion,
+      inicio_ms: parseTimeStringToMs(s.inicio),
+      fin_ms: parseTimeStringToMs(s.fin)
+    }));
     const frases = normalizeNumericArray(track.frases_ts_ms);
 
     // Calcular puntos
@@ -55,7 +79,6 @@ export function buildMixPlan(tracks: CancionAnalizada[]): MixPlanEntry[] {
       track,
       huecos,
       voces,
-      eventos,
       estructura,
       frases
     );
@@ -64,7 +87,6 @@ export function buildMixPlan(tracks: CancionAnalizada[]): MixPlanEntry[] {
       track,
       huecos,
       voces,
-      eventos,
       estructura,
       frases
     );
@@ -90,10 +112,9 @@ export function buildMixPlan(tracks: CancionAnalizada[]): MixPlanEntry[] {
  */
 function findSophisticatedEntryPoints(
   track: CancionAnalizada,
-  huecos: HuecoInstrumental[],
-  voces: SegmentoVoz[],
-  eventos: EventoClaveDJ[],
-  estructura: EstructuraMusical[],
+  huecos: HuecoWithMs[],
+  voces: Array<{ start_ms: number; end_ms: number }>,
+  estructura: EstructuraWithMs[],
   frases: number[]
 ): CuePoint[] {
   const candidates: CuePoint[] = [];
@@ -155,90 +176,7 @@ function findSophisticatedEntryPoints(
     }
   });
 
-  // 2. ANÁLISIS DE EVENTOS (Drops y Chanteos)
-  eventos.forEach(evento => {
-    // Calcular punto ideal de entrada (antes del evento para build-up)
-    const targetPoint = Math.max(0, evento.inicio_ms - PRE_EVENT_ROLLBACK_MS);
-
-    // CASO A: Hay espacio suficiente para build-up → DROP_SWAP
-    if (targetPoint > IMPACT_ENTRY_THRESHOLD_MS && targetPoint <= maxEntryMs) {
-      const gridAlignment = snapTo8BarGrid(targetPoint, track.bpm, track.downbeats_ts_ms || []);
-      const finalPoint = gridAlignment.alignedMs;
-
-      // Verificar colisión vocal durante el build-up
-      const vocalClash = checkVocalOverlap(finalPoint, evento.inicio_ms, voces);
-      const safeDuration = evento.inicio_ms - finalPoint;
-
-      if (safeDuration < MIN_MIX_WINDOW_MS) return;
-
-      let score = 90;
-      score *= WEIGHTS.EVENT_ALIGNMENT;
-      if (vocalClash) score *= WEIGHTS.VOCAL_CLASH_PENALTY;
-      if (gridAlignment.alignedTo8Bar) score *= 1.15;
-
-      const strategy: CueStrategy =
-        evento.evento === 'caida_de_bajo' ? 'DROP_SWAP' :
-          evento.evento === 'melodia_iconica' ? 'BREAKDOWN_ENTRY' :
-            'EVENT_SYNC';
-
-      candidates.push({
-        trackId: track.id,
-        hash: track.hash_archivo,
-        title: track.titulo,
-        pointMs: finalPoint,
-        type: 'IN',
-        strategy,
-        score: Math.min(Math.round(score), 100),
-        safeDurationMs: safeDuration,
-        hasVocalOverlap: vocalClash,
-        alignedToPhrase: true,
-        alignedToBar: gridAlignment.alignedToBar,
-        alignedTo8BarGrid: gridAlignment.alignedTo8Bar,
-        eventLink: `Build-up to ${evento.evento} at ${Math.round(evento.inicio_ms / 1000)}s`,
-        sectionType: evento.evento,
-        suggestedCurve: strategy === 'DROP_SWAP' ? 'BASS_SWAP' : 'LINEAR',
-        vocalType: vocalClash ? 'MELODIC_VOCAL' : 'NONE', // Asumimos peor caso si hay clash
-        freqFocus: 'MID', // Build-ups suelen ser medios
-      });
-    }
-
-    // CASO B: IMPACT ENTRY (Drop directo)
-    else if (evento.inicio_ms <= IMPACT_ENTRY_THRESHOLD_MS && evento.inicio_ms >= 1000) {
-      const gridAlignment = snapTo8BarGrid(evento.inicio_ms, track.bpm, track.downbeats_ts_ms || []);
-      const entryPoint = gridAlignment.alignedMs;
-
-      // NOVEDAD: Si es un evento tipo "Pla pla pla", lo marcamos como RHYTHMIC_CHANT
-      let type: VocalType = 'NONE';
-      if (checkVocalOverlap(entryPoint, entryPoint + 15000, voces)) {
-        const clasificacion = clasificarTipoVocal(entryPoint, entryPoint + 15000, voces);
-        type = clasificacion === 'chanteo_esporadico' ? 'RHYTHMIC_CHANT' : 'MELODIC_VOCAL';
-      }
-
-      let score = 65;
-      if (type === 'NONE') score += 15;
-      if (evento.evento === 'caida_de_bajo') score += 10;
-
-      candidates.push({
-        trackId: track.id,
-        hash: track.hash_archivo,
-        title: track.titulo,
-        pointMs: entryPoint,
-        type: 'IN',
-        strategy: 'IMPACT_ENTRY',
-        score: Math.min(Math.round(score), 100),
-        safeDurationMs: 2000,
-        hasVocalOverlap: type !== 'NONE',
-        alignedToPhrase: false,
-        alignedToBar: gridAlignment.alignedToBar,
-        alignedTo8BarGrid: gridAlignment.alignedTo8Bar,
-        eventLink: `Direct impact at ${evento.evento}`,
-        sectionType: evento.evento,
-        suggestedCurve: 'CUT',
-        vocalType: type,
-        freqFocus: 'LOW', // Drop = Bajos
-      });
-    }
-  });
+  // 2. ANÁLISIS DE EVENTOS eliminado (eventos_clave_dj ya no se usa)
 
   // 3. FALLBACK: Si no hay huecos ni eventos, usar estructura
   if (candidates.length === 0) {
@@ -289,10 +227,9 @@ function findSophisticatedEntryPoints(
  */
 function findSophisticatedExitPoints(
   track: CancionAnalizada,
-  huecos: HuecoInstrumental[],
-  voces: SegmentoVoz[],
-  eventos: EventoClaveDJ[],
-  estructura: EstructuraMusical[],
+  huecos: HuecoWithMs[],
+  voces: Array<{ start_ms: number; end_ms: number }>,
+  estructura: EstructuraWithMs[],
   frases: number[]
 ): CuePoint[] {
   const candidates: CuePoint[] = [];
@@ -362,46 +299,7 @@ function findSophisticatedExitPoints(
     }
   });
 
-  // 3. ESTRATEGIA: POST-CHORUS / PRE-DROP (Energy Switch)
-  eventos.forEach(evento => {
-    const exitPoint = evento.inicio_ms;
-    if (exitPoint < minExitMs) return;
-
-    const alignedExit = findNearestPhraseStart(exitPoint, frases, 2000) ?? exitPoint;
-    const windowBefore = Math.min(PRE_EVENT_ROLLBACK_MS, exitPoint);
-    const startMix = Math.max(0, alignedExit - windowBefore);
-    const vocalClash = checkVocalOverlap(startMix, alignedExit, voces);
-
-    let score = 75;
-    if (evento.evento === 'caida_de_bajo') {
-      score = 90;
-      score *= WEIGHTS.EVENT_ALIGNMENT;
-    }
-    if (vocalClash) score *= 0.7;
-    if (alignedExit === exitPoint) score *= WEIGHTS.PHRASE_ALIGNMENT;
-
-    const gridAlignment = snapTo8BarGrid(alignedExit, track.bpm, track.downbeats_ts_ms || []);
-
-    candidates.push({
-      trackId: track.id,
-      hash: track.hash_archivo,
-      title: track.titulo,
-      pointMs: alignedExit,
-      type: 'OUT',
-      strategy: 'DROP_SWAP',
-      score: Math.min(Math.round(score), 100),
-      safeDurationMs: windowBefore,
-      hasVocalOverlap: vocalClash,
-      alignedToPhrase: alignedExit === exitPoint,
-      alignedToBar: gridAlignment.alignedToBar,
-      alignedTo8BarGrid: gridAlignment.alignedTo8Bar,
-      eventLink: `Exit at ${evento.evento}`,
-      sectionType: evento.evento,
-      suggestedCurve: 'BASS_SWAP',
-      vocalType: vocalClash ? 'MELODIC_VOCAL' : 'NONE',
-      freqFocus: 'FULL',
-    });
-  });
+  // 3. ESTRATEGIA: POST-CHORUS / PRE-DROP eliminado (eventos_clave_dj ya no se usa)
 
   return candidates;
 }
@@ -409,7 +307,7 @@ function findSophisticatedExitPoints(
 /**
  * Helper para analizar qué tipo de amenaza vocal existe en un rango
  */
-function analyzeVocalTexture(start: number, end: number, voces: SegmentoVoz[]): VocalType {
+function analyzeVocalTexture(start: number, end: number, voces: Array<{ start_ms: number; end_ms: number }>): VocalType {
   const clasificacion = clasificarTipoVocal(start, end, voces);
   if (clasificacion === 'verso_denso') return 'MELODIC_VOCAL';
   if (clasificacion === 'chanteo_esporadico') return 'RHYTHMIC_CHANT';
@@ -419,7 +317,7 @@ function analyzeVocalTexture(start: number, end: number, voces: SegmentoVoz[]): 
 function addLoopCandidate(
   candidates: CuePoint[],
   track: CancionAnalizada,
-  hueco: HuecoInstrumental,
+  hueco: HuecoWithMs,
   loopSizeMs: number,
   type: '1_BAR' | '4_BAR'
 ) {
@@ -553,7 +451,7 @@ function findNearestPhraseStart(
 function checkVocalOverlap(
   startMs: number,
   endMs: number,
-  vocalSegments: SegmentoVoz[]
+  vocalSegments: Array<{ start_ms: number; end_ms: number }>
 ): boolean {
   return vocalSegments.some(seg => {
     const overlaps =
@@ -586,22 +484,14 @@ function normalizeNumericArray(data: number[] | string | null | undefined): numb
   return arr.filter(v => typeof v === 'number' && Number.isFinite(v));
 }
 
-function normalizeEventos(data: EventoClaveDJ[] | string | null | undefined): EventoClaveDJ[] {
-  return normalizeArray<EventoClaveDJ>(data).filter(e =>
-    e &&
-    typeof e.inicio_ms === 'number' &&
-    typeof e.fin_ms === 'number' &&
-    typeof e.evento === 'string'
-  );
-}
+
 
 function normalizeEstructura(data: EstructuraMusical[] | string | null | undefined): EstructuraMusical[] {
   return normalizeArray<EstructuraMusical>(data)
     .filter(s =>
       s &&
-      typeof s.inicio_ms === 'number' &&
-      typeof s.fin_ms === 'number' &&
+      typeof s.inicio === 'string' &&
+      typeof s.fin === 'string' &&
       typeof s.tipo_seccion === 'string'
-    )
-    .sort((a, b) => a.inicio_ms - b.inicio_ms);
+    );
 }

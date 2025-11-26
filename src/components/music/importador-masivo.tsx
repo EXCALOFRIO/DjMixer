@@ -63,7 +63,7 @@ export function ImportadorMasivo() {
       }
 
       const data = await response.json();
-      
+
       setResumen(data.resumen);
       setResultados(data.resultados || []);
       setProgreso({ actual: data.resumen.total, total: data.resumen.total });
@@ -71,6 +71,19 @@ export function ImportadorMasivo() {
 
       if (data.geminiEnProceso) {
         console.log(`✅ Fase 1 completada. ${data.resumen.geminiPendiente} análisis de Gemini en segundo plano.`);
+      } else {
+        // Si no hay Gemini pendiente (o ya terminó), lanzamos el planner
+        console.log('🚀 Análisis completo. Lanzando generador de mezclas...');
+        try {
+          const mixResponse = await fetch('/api/mix-sequence', { method: 'POST' });
+          if (mixResponse.ok) {
+            console.log('✅ Secuencia de mezcla generada y guardada.');
+          } else {
+            console.error('❌ Error generando secuencia de mezcla');
+          }
+        } catch (e) {
+          console.error('❌ Error llamando al planner:', e);
+        }
       }
 
     } catch (error) {
@@ -180,18 +193,17 @@ export function ImportadorMasivo() {
               {resultados.map((resultado, index) => (
                 <div
                   key={index}
-                  className={`flex items-center gap-3 p-3 rounded-lg border ${
-                    resultado.error
+                  className={`flex items-center gap-3 p-3 rounded-lg border ${resultado.error
                       ? 'bg-red-50 border-red-200'
                       : 'bg-green-50 border-green-200'
-                  }`}
+                    }`}
                 >
                   {resultado.error ? (
                     <XCircle className="h-5 w-5 text-red-500 flex-shrink-0" />
                   ) : (
                     <CheckCircle className="h-5 w-5 text-green-500 flex-shrink-0" />
                   )}
-                  
+
                   <div className="flex-1 min-w-0">
                     <div className="font-medium truncate">
                       {resultado.titulo || resultado.nombre || 'Sin título'}

@@ -288,9 +288,6 @@ export default function Home() {
                         if (!geminiData.gemini.huecos || !Array.isArray(geminiData.gemini.huecos)) {
                           camposFaltantes.push('huecos');
                         }
-                        if (!geminiData.gemini.analisis_contenido || typeof geminiData.gemini.analisis_contenido !== 'object') {
-                          camposFaltantes.push('analisis_contenido');
-                        }
                         // vocales_clave y loops_transicion pueden estar vacíos (canciones instrumentales)
                         if (!Array.isArray(geminiData.gemini.vocales_clave)) {
                           camposFaltantes.push('vocales_clave');

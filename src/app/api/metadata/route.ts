@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as musicMetadata from 'music-metadata';
 import { sql } from '@/lib/db';
-import { normalizeCancionRow } from '@/lib/db-normalize';
+import { normalizeCancionFromDB } from '@/lib/db-normalize';
 
 // Calcular hash SHA-256
 async function calcularHashArchivo(buffer: ArrayBuffer): Promise<string> {
@@ -38,11 +38,12 @@ export async function POST(request: NextRequest) {
           `;
 
           if (existente.length > 0) {
-            const cancion = normalizeCancionRow(existente[0] as Record<string, unknown>);
+            const cancion = normalizeCancionFromDB(existente[0] as Record<string, unknown>);
 
             // Verificar si el análisis de Gemini está incompleto
-            let geminiIncompleto = !cancion.analisis_contenido ||
-              (cancion.analisis_contenido as any).analisis_lirico_tematico?.tema_principal === 'Pendiente';
+            // Gemini está completo si tiene estructura_ts y vocales_clave
+            let geminiIncompleto = !cancion.estructura_ts ||
+              cancion.estructura_ts.length === 0;
 
             // Verificar también la tabla de jobs
             if (!geminiIncompleto) {

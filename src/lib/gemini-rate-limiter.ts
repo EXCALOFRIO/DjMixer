@@ -115,18 +115,14 @@ class GeminiRateLimiterImpl implements GeminiRateLimiter {
     const { hash, filePathOrUri, analisisTecnico } = task.payload;
     state.active += 1;
 
-    const segmentosVoz = analisisTecnico.segmentos_voz ?? [];
-
     analizarConGeminiOptimizado({
       fileMimeType: 'audio/mpeg',
-      segmentosVoz,
+      segmentosVoz: [],
       nombreCancion: hash,
       analisisTecnico: {
         bpm: analisisTecnico.bpm,
         compas: analisisTecnico.compas,
-        energia: analisisTecnico.energia,
         bailabilidad: analisisTecnico.bailabilidad,
-        animo_general: analisisTecnico.animo_general,
         tonalidad_camelot: analisisTecnico.tonalidad_camelot,
         tonalidad_compatible: analisisTecnico.tonalidad_compatible,
         duracion_ms: analisisTecnico.duracion_ms,

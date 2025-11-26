@@ -486,8 +486,6 @@ export function PlaybackInterface({ tracks, volume, mixPlan, mixSequence }: Play
               <span>{currentTrack.analisis.bpm?.toFixed(0)} BPM</span>
               <span>•</span>
               <span>{currentTrack.analisis.tonalidad_camelot}</span>
-              <span>•</span>
-              <span className="capitalize">{currentTrack.analisis.animo_general}</span>
             </div>
           )}
         </div>

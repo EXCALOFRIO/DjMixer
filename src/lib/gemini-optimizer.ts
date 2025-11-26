@@ -8,25 +8,56 @@ import { GoogleGenAI } from '@google/genai';
 import { actualizarProgresoJob } from './analysis-jobs';
 import { getGeminiApiKeys } from './gemini-keys';
 import type {
-  AnalisisContenido,
   EstructuraMusical,
-  EventoClaveDJ,
   BloqueVocal,
   LoopTransicion,
   CancionAnalizada,
-  SegmentoVoz,
+  HuecoInstrumental,
 } from './db';
+
+import * as fs from 'fs/promises';
+import * as path from 'path';
+
+// ... imports ...
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+const ENABLE_DEBUG_LOGGING = true;
+const DEBUG_LOG_DIR = path.join(process.cwd(), '.gemini', 'debug');
 
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 
-/** Convierte ms a MM:SS para el prompt (Gemini entiende mejor este formato) */
+/** Guarda el prompt y la respuesta en un archivo de texto para depuración */
+async function saveDebugLog(songTitle: string, prompt: string, response: any) {
+  if (!ENABLE_DEBUG_LOGGING) return;
+
+  try {
+    await fs.mkdir(DEBUG_LOG_DIR, { recursive: true });
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const sanitizedTitle = songTitle.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
+    const filename = `${timestamp}_${sanitizedTitle}.txt`;
+    const filePath = path.join(DEBUG_LOG_DIR, filename);
+
+    const content = `=== PROMPT ===\n${prompt}\n\n=== RESPONSE ===\n${JSON.stringify(response, null, 2)}\n`;
+
+    await fs.writeFile(filePath, content, 'utf-8');
+    console.log(`📝 Debug log guardado: ${filename}`);
+  } catch (error) {
+    console.error('⚠️ Error guardando debug log:', error);
+  }
+}
+
+/** Convierte ms a MM:SS.d para el prompt (Gemini entiende mejor este formato con decimales) */
 function formatTimeForPrompt(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
+  const totalSeconds = ms / 1000;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  // Formato MM:SS.d (ej: 01:30.5)
+  return `${minutes}:${seconds.toFixed(1).padStart(4, '0')}`;
 }
 
 /** Convierte ms a segundos con 2 decimales (1500ms -> 1.5s) */
@@ -39,11 +70,31 @@ function secToMs(sec: number): number {
   return Math.round(sec * 1000);
 }
 
+/** Convierte MM:SS a ms */
+export function parseTimeStringToMs(timeStr: string): number {
+  if (!timeStr || typeof timeStr !== 'string') return 0;
+
+  try {
+    const parts = timeStr.split(':');
+    if (parts.length === 2) {
+      const minutes = parseInt(parts[0], 10);
+      const seconds = parseFloat(parts[1]); // Permitir decimales en segundos si Gemini los manda
+      return (minutes * 60 * 1000) + Math.round(seconds * 1000);
+    }
+    // Fallback si manda solo segundos como string
+    const seconds = parseFloat(timeStr);
+    if (!isNaN(seconds)) return Math.round(seconds * 1000);
+  } catch (e) {
+    console.warn(`⚠️ Error parseando tiempo: ${timeStr}`, e);
+  }
+  return 0;
+}
+
 /**
  * CLASIFICADOR DE DENSIDAD VOCAL (Exported for mix-planner and mix-transitions)
  * Distingue entre un Verso real (canto fluido) y efectos vocales/chanteos (gritos, "pla pla pla").
  */
-export function clasificarTipoVocal(inicioMs: number, finMs: number, vad: SegmentoVoz[]): 'verso_denso' | 'chanteo_esporadico' | 'silencio' {
+export function clasificarTipoVocal(inicioMs: number, finMs: number, vad: Array<{ start_ms: number; end_ms: number }>): 'verso_denso' | 'chanteo_esporadico' | 'silencio' {
   const duracionTotal = finMs - inicioMs;
   if (duracionTotal <= 0) return 'silencio';
 
@@ -80,44 +131,65 @@ export function clasificarTipoVocal(inicioMs: number, finMs: number, vad: Segmen
 }
 
 /**
- * GROUND TRUTH VALIDATION
- * Valida si un intervalo temporal tiene voz real según el VAD
- * Esto previene alucinaciones de Gemini marcando versos donde no hay voz
+ * ALINEACIÓN MAGNÉTICA POR CLÚSTER (VAD CLUSTERING)
+ * Toma el tiempo aproximado de Gemini y busca un GRUPO de segmentos VAD que encajen.
+ * Devuelve el inicio del PRIMER segmento del grupo y el fin del ÚLTIMO.
+ * 
+ * Esto resuelve el problema de VAD "ametralladora" (muchos cortes pequeños) vs
+ * Gemini que entiende la frase completa.
  */
-function validarPresenciaVocal(inicio: number, fin: number, vad: SegmentoVoz[]): boolean {
-  // Margen de error de 1 segundo
-  const margen = 1000;
-  // Buscamos si hay algún solapamiento significativo
-  return vad.some(v =>
-    (inicio < v.end_ms + margen) && (fin > v.start_ms - margen)
-  );
-}
+function snapToVADCluster(
+  inicioGeminiMs: number,
+  finGeminiMs: number,
+  vad: Array<{ start_ms: number; end_ms: number }>
+): { start: number; end: number; match: boolean; gaps_filled: number } {
+  // 1. Configuración de Tolerancia
+  // Cuánto permitimos que Gemini se desvíe por fuera de los bordes reales
+  const MARGEN_TOLERANCIA = 1500; // 1.5s
 
-/** Mapea sección de Gemini a tipo interno */
-function mapSeccionToTipo(seccion: string): EstructuraMusical['tipo_seccion'] {
-  const map: Record<string, EstructuraMusical['tipo_seccion']> = {
-    'intro': 'intro',
-    'verso': 'verso',
-    'estribillo': 'estribillo',
-    'puente': 'puente',
-    'instrumental': 'solo_instrumental',
-    'outro': 'outro',
-    'build_up': 'subidon_build_up',
-    'drop': 'subidon_build_up'
-  };
-  return map[seccion.toLowerCase()] || 'verso';
-}
+  // 2. Filtrar segmentos VAD que "tocan" la predicción de Gemini
+  // Un segmento es relevante si:
+  // - Empieza dentro del rango de Gemini (+- margen)
+  // - O termina dentro del rango de Gemini (+- margen)
+  // - O está completamente dentro
+  // - O cubre completamente el rango de Gemini
+  const segmentosRelevantes = vad.filter(v => {
+    const startOverlap = v.start_ms >= (inicioGeminiMs - MARGEN_TOLERANCIA) && v.start_ms <= (finGeminiMs + MARGEN_TOLERANCIA);
+    const endOverlap = v.end_ms >= (inicioGeminiMs - MARGEN_TOLERANCIA) && v.end_ms <= (finGeminiMs + MARGEN_TOLERANCIA);
+    const contained = v.start_ms >= (inicioGeminiMs - MARGEN_TOLERANCIA) && v.end_ms <= (finGeminiMs + MARGEN_TOLERANCIA);
+    const covers = v.start_ms <= (inicioGeminiMs + MARGEN_TOLERANCIA) && v.end_ms >= (finGeminiMs - MARGEN_TOLERANCIA);
 
-/** Mapea evento DJ de Gemini a tipo interno */
-function mapEventoDJ(tipo: string): EventoClaveDJ['evento'] | null {
-  const map: Record<string, EventoClaveDJ['evento']> = {
-    'drop': 'caida_de_bajo',
-    'break': 'acapella_break',
-    'build_up': 'cambio_ritmico_notable',
-    'cambio_ritmo': 'cambio_ritmico_notable',
-    'hook': 'melodia_iconica'
+    return startOverlap || endOverlap || contained || covers;
+  });
+
+  // 3. Si no hay coincidencia, devolvemos lo que dijo Gemini (fallback) o false si somos estrictos
+  if (segmentosRelevantes.length === 0) {
+    return { start: inicioGeminiMs, end: finGeminiMs, match: false, gaps_filled: 0 };
+  }
+
+  // 4. Calcular los extremos REALES basados en el VAD
+  // Ordenamos por si acaso
+  segmentosRelevantes.sort((a, b) => a.start_ms - b.start_ms);
+
+  const startReal = segmentosRelevantes[0].start_ms;
+  const endReal = segmentosRelevantes[segmentosRelevantes.length - 1].end_ms;
+
+  // 5. Validación de cordura (Sanity Check)
+  // Si Gemini dijo 5 segundos, pero el cluster VAD resultante es de 30 segundos, algo falló.
+  // const duracionGemini = finGeminiMs - inicioGeminiMs;
+  // const duracionReal = endReal - startReal;
+
+  // Si el VAD detectado es monstruosamente más grande (> 300% y > 5s de diferencia),
+  // probablemente Gemini alucinó un verso corto en medio de un verso largo.
+  // En ese caso, confiamos más en Gemini para recortar, o en el VAD para expandir.
+  // Para DJing, es mejor pecar de "dejar sonar un poco más" que cortar voz.
+
+  return {
+    start: startReal,
+    end: endReal,
+    match: true,
+    gaps_filled: segmentosRelevantes.length - 1 // Cuántos huecos de silencio unimos
   };
-  return map[tipo.toLowerCase()] || null;
 }
 
 /** Verifica si un error de Gemini es reintentable */
@@ -153,16 +225,14 @@ export interface AnalisisGeminiParams {
   fileUri?: string;
   fileMimeType: string;
   fileBuffer?: ArrayBuffer;
-  segmentosVoz: SegmentoVoz[];
+  segmentosVoz?: Array<{ start_ms: number; end_ms: number }>; // OPCIONAL - Ya no se usa en Gemini
   nombreCancion?: string;
   analisisTecnico: {
     duracion_ms: number;
     bpm: number;
-    energia: number;
     tonalidad_camelot: string;
     tonalidad_compatible: string[];
     bailabilidad: number;
-    animo_general: string;
     compas: { numerador: number; denominador: number };
     beats_ts_ms: number[];
     downbeats_ts_ms: number[];
@@ -182,7 +252,7 @@ export async function analizarConGeminiDJ(params: AnalisisGeminiParams): Promise
   let ai = getGeminiClient(params.apiKeyOverride);
   const inicio = Date.now();
 
-  console.log('\n🎧 ANÁLISIS DJ-CENTRIC CON GEMINI (ULTRA-RÁPIDO)');
+  console.log('\n🎧 ANÁLISIS DJ-CENTRIC CON GEMINI (OPTIMIZADO REMIXES)');
   console.log('═'.repeat(80));
 
   if (params.nombreCancion) {
@@ -197,114 +267,102 @@ export async function analizarConGeminiDJ(params: AnalisisGeminiParams): Promise
   const duracionFormatted = formatTimeForPrompt(duracionMaxMs);
   const durationSec = msToSec(duracionMaxMs);
 
-  // Preparar contexto VAD en formato MM:SS
-  const segmentosContexto = params.segmentosVoz && params.segmentosVoz.length > 0
-    ? params.segmentosVoz.map(s => `[${formatTimeForPrompt(s.start_ms)}-${formatTimeForPrompt(s.end_ms)}]`).join(', ')
-    : 'No disponible (analizar audio para detectar voz)';
-
   console.log(`⏱️  Duración: ${duracionFormatted} (${durationSec}s)`);
-  console.log(`🎤 Zonas VAD: ${segmentosContexto}`);
+  console.log(`🎵 Análisis 100% Gemini (sin VAD - análisis puro de audio)`);
 
   // ============================================================================
-  // DJ-CENTRIC SCHEMA
+  // DJ-CENTRIC COMPACT SCHEMA
   // ============================================================================
-
-  // ============================================================================
-  // SCHEMA ULTRA-OPTIMIZADO - Solo datos para algoritmo A* de mezcla
-  // ============================================================================
-  const djSchema = {
+  const djCompactSchema = {
     type: 'object',
     properties: {
-      estructura: {
+      // Estructura: { s: start, e: end, c: code, ly: lyrics snippet }
+      s: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
-            seccion: {
-              type: 'string',
-              enum: ['intro', 'verso', 'estribillo', 'puente', 'instrumental', 'outro', 'drop', 'build_up']
-            },
-            inicio_segundos: { type: 'number' },
-            fin_segundos: { type: 'number' }
+            s: { type: 'string', description: "MM:SS.d" },
+            e: { type: 'string', description: "MM:SS.d" },
+            c: { type: 'string', enum: ['i', 'v', 'c', 'p', 's', 'o', 'b'] },
+            ly: { type: 'string', description: "Snippet de letra o 'instrumental'" }
           },
-          required: ['seccion', 'inicio_segundos', 'fin_segundos']
+          required: ['s', 'e', 'c']
         }
       },
-      vocales_principales: {
+      // Vocales: { s: start, e: end, c: code }
+      v: {
         type: 'array',
-        description: 'Solo bloques de voz PRINCIPAL (versos/coros). NO adlibs ni gritos cortos',
         items: {
           type: 'object',
           properties: {
-            tipo: {
-              type: 'string',
-              enum: ['bloque_verso', 'bloque_coro']
-            },
-            inicio_segundos: { type: 'number' },
-            fin_segundos: { type: 'number' }
+            s: { type: 'string', description: "MM:SS.d" },
+            e: { type: 'string', description: "MM:SS.d" },
+            c: { type: 'string', enum: ['v', 'c'] }
           },
-          required: ['tipo', 'inicio_segundos', 'fin_segundos']
+          required: ['s', 'e', 'c']
         }
       },
-      loops: {
+      // Loops: { s: start, e: end, t: text, sc: score }
+      l: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
-            frase: { type: 'string' },
-            inicio_segundos: { type: 'number' },
-            fin_segundos: { type: 'number' },
-            score: { type: 'number', minimum: 1, maximum: 10 }
+            s: { type: 'string', description: "MM:SS.d" },
+            e: { type: 'string', description: "MM:SS.d" },
+            t: { type: 'string' },
+            sc: { type: 'number' }
           },
-          required: ['frase', 'inicio_segundos', 'fin_segundos', 'score']
+          required: ['s', 'e', 't', 'sc']
         }
       },
-      eventos_dj: {
+      // Eventos DJ: { t: time, c: code }
+      e: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
-            tipo: { type: 'string', enum: ['drop', 'break', 'build_up'] },
-            tiempo_segundos: { type: 'number' }
+            t: { type: 'string', description: "MM:SS.d" },
+            c: { type: 'string', enum: ['d', 'b', 'r', 'h'] }
           },
-          required: ['tipo', 'tiempo_segundos']
+          required: ['t', 'c']
         }
       }
     },
-    required: ['estructura', 'vocales_principales', 'loops', 'eventos_dj']
+    required: ['s', 'v', 'l', 'e']
   };
 
   // ============================================================================
-  // PROMPT ULTRA-OPTIMIZADO - Solo datos de mezcla
+  // PROMPT ULTRA-OPTIMIZADO - REMIX FRIENDLY
   // ============================================================================
+  const prompt = `ERES UN EXPERTO EN TEORÍA MUSICAL Y DJ PROFESIONAL.
+Analiza esta canción (Duración: ${durationSec}s, BPM: ${params.analisisTecnico.bpm}).
 
-  // ============================================================================
-  // PROMPT ANTI-ALUCINACIONES CON GROUND TRUTH
-  // ============================================================================
-  const prompt = `ACTÚA COMO INGENIERO DE AUDIO. ANALIZA ESTE ARCHIVO ESPECÍFICO.
+TU OBJETIVO: Definir la MACRO-ESTRUCTURA musical y los puntos de mezcla.
 
-⚠️ ADVERTENCIA DE SEGURIDAD:
-Este audio puede ser un REMIX, RADIO EDIT o EXTENDED MIX.
-NO USES TU MEMORIA sobre la "canción original".
-SOLO ANALIZA LO QUE ESCUCHAS Y LOS DATOS TÉCNICOS PROVISTOS.
+IMPORTANTE SOBRE LA ESTRUCTURA ("s"):
+1. NO FRAGMENTES SECCIONES: Un "Verso" o un "Coro" son bloques largos (16-64 compases).
+2. IGNORA SILENCIOS CORTOS (< 4s) dentro de una misma sección. Si el cantante respira, la sección CONTINÚA.
+3. DETECTA EL CORO (ESTRIBILLO): Es la parte más energética, repetitiva y suele contener el título de la canción.
+4. DIFERENCIA: "Pre-Coro" (preparación) vs "Coro" (explosión).
 
-DATOS TÉCNICOS (VERDAD ABSOLUTA):
-- Duración Total: ${durationSec} segundos.
-- Zonas con VOZ HUMANA (VAD): ${segmentosContexto || "NINGUNA DETECTADA"}
-- BPM: ${params.analisisTecnico.bpm}
+FORMATO JSON REQUERIDO:
 
-REGLAS ESTRICTAS DE ESTRUCTURA:
-1. Si un segmento de tiempo NO está en la lista de "Zonas con VOZ HUMANA", es IMPOSIBLE que sea "verso" o "estribillo". Debe ser "intro", "instrumental", "puente", "drop" u "outro".
-2. NO inventes letra en zonas instrumentales.
-3. El "Outro" debe terminar exactamente en el segundo ${durationSec}.
+"s" (Estructura MACRO): Bloques musicales COMPLETOS.
+   - Códigos: "i"(intro), "v"(verso), "p"(pre-coro/puente), "c"(coro/estribillo), "s"(solo/inst), "o"(outro).
+   - "ly": Escribe 3-4 palabras de la letra que suenen ahí para identificar la sección.
 
-TAREAS (JSON en SEGUNDOS):
-1. "estructura": Segmentación completa.
-2. "vocales_principales": Bloques grandes de voz (Versos/Coros). IGNORA voces cortas (adlibs).
-3. "loops": Frases repetitivas al final de bloques para mezclar (ej: "tú sabes... tú sabes...").
-4. "eventos_dj": Drops y cambios de energía.
+"v" (Voz Real): Aquí SÍ sé preciso con los silencios.
+   - Marca exactamente cuándo hay voz y cuándo hay hueco instrumental.
 
-Responde solo con el JSON.`;
+"l" (Loops de Mezcla): Frases pegadizas de 1 a 4 compases (aprox 2-8 seg).
+   - Ideal para hacer loops antes de un drop o cambio.
+
+"e" (Eventos): Cambios bruscos de energía.
+   - "d"(drop), "b"(breakdown/bajón).
+
+RESPONDE SOLO JSON. USA FORMATO "MM:SS.d".`;
 
   console.log('\n📝 Enviando prompt DJ-céntrico a Gemini...');
 
@@ -344,12 +402,12 @@ Responde solo con el JSON.`;
         model: 'models/gemini-flash-latest',
         contents: [{ role: 'user', parts }],
         config: {
-          temperature: 0.2,
+          temperature: 1.0,
           topP: 0.95,
           topK: 40,
-          maxOutputTokens: 8192,
+          maxOutputTokens: 65536,
           responseMimeType: 'application/json',
-          responseJsonSchema: djSchema,
+          responseJsonSchema: djCompactSchema,
         }
       });
 
@@ -365,7 +423,14 @@ Responde solo con el JSON.`;
       console.warn(`⚠️ Error en intento ${intento + 1}: ${errorMsg} (código: ${errorCode})`);
 
       // Extraer tiempo de espera sugerido (retryDelay)
-      let waitTime = 2000 * (intento + 1); // Default backoff
+      let waitTime = 2000 * (intento + 1); // Default backoff: 2s, 4s, 6s
+
+      // Para errores 503 (Service Overloaded), esperar mucho más tiempo
+      if (errorCode === 503 || errorMsg.includes('503') || errorMsg.includes('overloaded')) {
+        waitTime = 10000 * (intento + 1); // 10s, 20s, 30s when service is overloaded
+        console.log(`⚠️ Servicio sobrecargado (503). Esperando ${waitTime / 1000}s antes de reintentar...`);
+      }
+
       const retryDelayMatch = errorMsg.match(/retry in ([\d.]+)s/);
       if (retryDelayMatch) {
         waitTime = Math.ceil(parseFloat(retryDelayMatch[1]) * 1000) + 1000; // +1s buffer
@@ -409,216 +474,257 @@ Responde solo con el JSON.`;
     await actualizarProgresoJob(params.jobId, 95, 'Procesando respuesta...');
   }
 
-  let resultado: any;
+  let resultado: any = {};
   try {
-    resultado = JSON.parse(response.text || '{}');
+    // CORRECCIÓN: Limpieza de Markdown antes de parsear
+    let text = typeof response.text === 'function' ? response.text() : (response.text || '{}');
+
+    // GUARDAR DEBUG LOG
+    await saveDebugLog(params.titulo, prompt, text);
+
+    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    resultado = JSON.parse(text);
   } catch (e) {
-    throw new Error('Respuesta JSON inválida de Gemini');
+    console.error('⚠️ Error parseando JSON de Gemini, usando Fallbacks:', e);
+    resultado = {}; // Esto activará los fallbacks
   }
 
   console.log('\n📊 Procesando respuesta DJ-céntrica...');
 
-  // ============================================================================
-  // POST-PROCESAMIENTO CON VALIDACIÓN VAD (GROUND TRUTH)
-  // ============================================================================
+  // Diccionarios para traducir los códigos cortos a tus tipos DB
+  const mapTipoEst: Record<string, EstructuraMusical['tipo_seccion']> = { i: 'intro', v: 'verso', c: 'estribillo', p: 'puente', s: 'solo_instrumental', o: 'outro', b: 'subidon_build_up' };
+  const mapTipoVoc: Record<string, BloqueVocal['tipo']> = { v: 'bloque_verso', c: 'bloque_coro' };
 
   // 1. Convertir estructura (segundos → ms) y CORREGIR ALUCINACIONES
-  const estructura = Array.isArray(resultado.estructura)
-    ? resultado.estructura.map((s: any) => {
-      const inicioMs = Math.min(secToMs(s.inicio_segundos), duracionMaxMs);
-      const finMs = Math.min(secToMs(s.fin_segundos), duracionMaxMs);
+  let estructuraTemp = (resultado.s || []).map((item: any) => {
+    const inicioMs = Math.min(parseTimeStringToMs(item.s), duracionMaxMs);
+    const finMs = Math.min(parseTimeStringToMs(item.e), duracionMaxMs);
+    let seccion = mapTipoEst[item.c] || 'verso';
 
-      let seccion = s.seccion;
+    // Sin validación VAD - confiamos 100% en Gemini
+    return {
+      tipo_seccion: seccion,
+      inicio_ms: inicioMs,
+      fin_ms: finMs
+    };
+  }).filter((s: any) => s.inicio_ms < s.fin_ms)
+    .sort((a: any, b: any) => a.inicio_ms - b.inicio_ms);
 
-      // VALIDACIÓN DE REALIDAD:
-      // Si Gemini dice "verso" o "estribillo", pero el VAD dice que hay silencio...
-      // ...lo cambiamos a "instrumental" o "puente" forzosamente.
-      const esVocal = ['verso', 'estribillo'].includes(seccion.toLowerCase());
-      const hayVozReal = validarPresenciaVocal(inicioMs, finMs, params.segmentosVoz);
+  // ============================================================================
+  // FUSIÓN INTELIGENTE (INTELLIGENT MERGING)
+  // ============================================================================
+  // Si hay dos secciones del mismo tipo separadas por menos de 6 segundos,
+  // son probablemente la misma sección fragmentada por Gemini.
+  // Esto resuelve el problema de "5 versos de 10s" → "1 verso de 50s"
 
-      if (esVocal && !hayVozReal) {
-        console.warn(`👻 Alucinación corregida: "${seccion}" en ${s.inicio_segundos}s cambiado a "puente" por falta de VAD.`);
-        seccion = 'puente'; // O 'instrumental'
+  const estructuraMerged: any[] = [];
+  let fusionesRealizadas = 0;
+
+  if (estructuraTemp.length > 0) {
+    let actual = { ...estructuraTemp[0] };
+
+    for (let i = 1; i < estructuraTemp.length; i++) {
+      const siguiente = estructuraTemp[i];
+      const gap = siguiente.inicio_ms - actual.fin_ms;
+
+      // Reglas para fusionar:
+      // 1. Mismo tipo de sección
+      // 2. El hueco entre ellas es pequeño (< 6 segundos, aproximadamente 2-3 compases)
+      if (actual.tipo_seccion === siguiente.tipo_seccion && gap < 6000) {
+        // FUSIONAR: Extendemos el final del bloque actual
+        console.log(`🔗 Fusionando "${actual.tipo_seccion}": ${formatTimeForPrompt(actual.inicio_ms)}-${formatTimeForPrompt(actual.fin_ms)} + ${formatTimeForPrompt(siguiente.inicio_ms)}-${formatTimeForPrompt(siguiente.fin_ms)} (gap: ${(gap / 1000).toFixed(1)}s)`);
+        actual.fin_ms = siguiente.fin_ms;
+        fusionesRealizadas++;
+      } else {
+        // NO FUSIONAR: Guardar el bloque actual y empezar uno nuevo
+        estructuraMerged.push(actual);
+        actual = { ...siguiente };
       }
-
-      return {
-        seccion,
-        inicio_ms: inicioMs,
-        fin_ms: finMs
-      };
-    }).filter((s: any) => s.inicio_ms < s.fin_ms)
-    : [];
-
-  // Fix: El último segmento debe terminar exactamente en duracionMaxMs
-  if (estructura.length > 0) {
-    estructura[estructura.length - 1].fin_ms = duracionMaxMs;
+    }
+    estructuraMerged.push(actual); // Guardar el último bloque
   }
 
-  // 2. Convertir vocales_principales (con filtro de segmentos cortos Y validación VAD)
-  const vocalesClave: BloqueVocal[] = Array.isArray(resultado.vocales_principales)
-    ? resultado.vocales_principales.map((v: any) => ({
-      tipo: v.tipo as BloqueVocal['tipo'],
-      inicio_ms: Math.min(secToMs(v.inicio_segundos), duracionMaxMs),
-      fin_ms: Math.min(secToMs(v.fin_segundos), duracionMaxMs)
-    }))
-      // Filtro 1: Duración mínima (evita ruiditos)
-      .filter((v: any) => (v.fin_ms - v.inicio_ms) > 1500)
-      // Filtro 2: GROUND TRUTH - Validación contra VAD real
-      .filter((v: any) => {
-        const hayVoz = validarPresenciaVocal(v.inicio_ms, v.fin_ms, params.segmentosVoz);
-        if (!hayVoz) {
-          console.warn(`👻 Vocal alucinado eliminado: ${v.tipo} en ${msToSec(v.inicio_ms)}s (sin VAD)`);
-        }
-        return hayVoz;
-      })
-    : [];
+  // Reemplazar estructuraTemp con la versión fusionada
+  if (fusionesRealizadas > 0) {
+    console.log(`✨ Fusión inteligente completada: ${fusionesRealizadas} fusiones realizadas`);
+    console.log(`   Secciones antes: ${estructuraTemp.length} → después: ${estructuraMerged.length}`);
+    estructuraTemp = estructuraMerged;
+  }
+
+  // FALLBACK ESTRUCTURA: Si Gemini falló y el array está vacío
+  if (estructuraTemp.length === 0) {
+    console.warn('⚠️ Gemini no devolvió estructura. Generando estructura básica.');
+    estructuraTemp = [
+      { tipo_seccion: 'intro', inicio_ms: 0, fin_ms: 15000 },
+      { tipo_seccion: 'verso', inicio_ms: 15000, fin_ms: duracionMaxMs - 15000 },
+      { tipo_seccion: 'outro', inicio_ms: duracionMaxMs - 15000, fin_ms: duracionMaxMs }
+    ];
+  }
+
+  // Fix: El último segmento debe terminar exactamente en duracionMaxMs
+  if (estructuraTemp.length > 0) {
+    estructuraTemp[estructuraTemp.length - 1].fin_ms = duracionMaxMs;
+  }
+
+  // Map to final string format
+  const estructura: EstructuraMusical[] = estructuraTemp.map((s: any) => ({
+    tipo_seccion: s.tipo_seccion,
+    inicio: formatTimeForPrompt(s.inicio_ms),
+    fin: formatTimeForPrompt(s.fin_ms)
+  }));
+
+  // 2. Convertir vocales (timestamps directos de Gemini)
+  let vocalesTemp = (resultado.v || []).map((item: any) => {
+    const rawStart = parseTimeStringToMs(item.s);
+    const rawEnd = parseTimeStringToMs(item.e);
+
+    return {
+      tipo: mapTipoVoc[item.c] || 'bloque_verso',
+      inicio_ms: Math.min(rawStart, duracionMaxMs),
+      fin_ms: Math.min(rawEnd, duracionMaxMs),
+    };
+  })
+    // Filtro: Rechazar bloques muy cortos (< 2s) excepto si son muy largos (safety)
+    .filter((v: any) => (v.fin_ms - v.inicio_ms) >= 2000);
+
+  // Sin fallback VAD - confiamos 100% en lo que Gemini detectó
+  // Si Gemini no detectó vocales, respetamos esa decisión
+
+  const vocalesClave: BloqueVocal[] = vocalesTemp.map((v: any) => ({
+    tipo: v.tipo,
+    inicio: formatTimeForPrompt(v.inicio_ms),
+    fin: formatTimeForPrompt(v.fin_ms)
+  }));
+
+  console.log(`✅ Vocales detectadas: ${vocalesClave.length} bloques`);
+  if (vocalesClave.length > 0) {
+    console.log(`   Primer bloque: ${vocalesClave[0].inicio} - ${vocalesClave[0].fin} (${vocalesClave[0].tipo})`);
+  }
 
   // 3. Convertir loops
-  const loopsTransicion: LoopTransicion[] = Array.isArray(resultado.loops)
-    ? resultado.loops.map((l: any) => ({
-      texto: String(l.frase || ''),
-      inicio_ms: Math.min(secToMs(l.inicio_segundos), duracionMaxMs),
-      fin_ms: Math.min(secToMs(l.fin_segundos), duracionMaxMs),
-      score: Math.max(1, Math.min(10, Number(l.score) || 5))
-    })).filter((l: any) => l.inicio_ms < l.fin_ms)
-    : [];
+  let loopsTemp = (resultado.l || []).map((item: any) => ({
+    inicio_ms: Math.min(parseTimeStringToMs(item.s), duracionMaxMs),
+    fin_ms: Math.min(parseTimeStringToMs(item.e), duracionMaxMs),
+    texto: item.t || '',
+    score: Math.max(1, Math.min(10, Number(item.sc) || 5))
+  })).filter((l: any) => l.inicio_ms < l.fin_ms);
 
+  // 4. Eventos DJ eliminados (campo eventos_clave_dj ya no se usa)
 
-  const eventosDj = Array.isArray(resultado.eventos_dj)
-    ? resultado.eventos_dj.map((e: any) => ({
-      tipo: e.tipo,
-      tiempo_ms: Math.min(secToMs(e.tiempo_segundos), duracionMaxMs)
-    }))
-    : [];
-
-  // 5. Recalcular huecos instrumentales basándonos en vocales_clave
-  const huecos: any[] = [];
-
-  if (vocalesClave.length > 0) {
-    const vocalesOrdenadas = [...vocalesClave].sort((a, b) => a.inicio_ms - b.inicio_ms);
-
-    // Hueco antes del primer bloque vocal
-    if (vocalesOrdenadas[0].inicio_ms > 4000) {
+  // 5. Recalcular huecos instrumentales basándonos en vocales_clave (Usando vocalesTemp que tiene MS)
+  const huecos: HuecoInstrumental[] = [];
+  if (vocalesTemp.length > 0) {
+    const sorted = [...vocalesTemp].sort((a: any, b: any) => a.inicio_ms - b.inicio_ms);
+    // Inicio
+    if (sorted[0].inicio_ms > 4000) {
       huecos.push({
-        inicio_ms: 0,
-        fin_ms: vocalesOrdenadas[0].inicio_ms,
+        inicio: formatTimeForPrompt(0),
+        fin: formatTimeForPrompt(sorted[0].inicio_ms),
         tipo: 'instrumental_puro'
       });
     }
-
-    // Huecos entre bloques vocales
-    for (let i = 0; i < vocalesOrdenadas.length - 1; i++) {
-      const gap = vocalesOrdenadas[i + 1].inicio_ms - vocalesOrdenadas[i].fin_ms;
+    // Medio
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const gap = sorted[i + 1].inicio_ms - sorted[i].fin_ms;
       if (gap > 3000) {
         huecos.push({
-          inicio_ms: vocalesOrdenadas[i].fin_ms,
-          fin_ms: vocalesOrdenadas[i + 1].inicio_ms,
+          inicio: formatTimeForPrompt(sorted[i].fin_ms),
+          fin: formatTimeForPrompt(sorted[i + 1].inicio_ms),
           tipo: 'instrumental_puro'
         });
       }
     }
-
-    // Hueco después del último bloque vocal
-    const ultimoVocal = vocalesOrdenadas[vocalesOrdenadas.length - 1];
-    if (duracionMaxMs - ultimoVocal.fin_ms > 4000) {
+    // Final
+    if (duracionMaxMs - sorted[sorted.length - 1].fin_ms > 4000) {
       huecos.push({
-        inicio_ms: ultimoVocal.fin_ms,
-        fin_ms: duracionMaxMs,
+        inicio: formatTimeForPrompt(sorted[sorted.length - 1].fin_ms),
+        fin: formatTimeForPrompt(duracionMaxMs),
         tipo: 'instrumental_puro'
       });
     }
   } else {
-    // Si no hay vocales, toda la canción es instrumental
     huecos.push({
-      inicio_ms: 0,
-      fin_ms: duracionMaxMs,
+      inicio: formatTimeForPrompt(0),
+      fin: formatTimeForPrompt(duracionMaxMs),
       tipo: 'instrumental_puro'
     });
   }
 
+  // FALLBACK: Si Gemini no encontró loops, o encontró muy pocos,
+  // creamos loops instrumentales "seguros" basados en los huecos detectados.
+  if (loopsTemp.length < 2) {
+    huecos.forEach(hueco => {
+      const inicioMs = parseTimeStringToMs(hueco.inicio);
+      const finMs = parseTimeStringToMs(hueco.fin);
+      const duracion = finMs - inicioMs;
+
+      // Si el hueco dura más de 8 segundos (aprox 4 compases a 120bpm)
+      if (duracion >= 8000) {
+        // Crear un loop al final del hueco (ideal para mezclar salida)
+        loopsTemp.push({
+          texto: "Loop Instrumental (Safety)", // Marcador especial
+          inicio_ms: finMs - 4000, // Últimos 4 seg
+          fin_ms: finMs,
+          score: 8 // Score alto porque es instrumental puro = fácil de mezclar
+        });
+      }
+    });
+  }
+
+  // Ordenar loops por tiempo
+  loopsTemp.sort((a: any, b: any) => a.inicio_ms - b.inicio_ms);
+
+  const loopsTransicion: LoopTransicion[] = loopsTemp.map((l: any) => ({
+    texto: l.texto,
+    inicio: formatTimeForPrompt(l.inicio_ms),
+    fin: formatTimeForPrompt(l.fin_ms),
+    score: l.score
+  }));
+
   // Validación
   console.log(`✅ Análisis DJ completado:`);
   console.log(`   ✅ Estructura: ${estructura.length} secciones`);
+
+  // Mostrar resumen de estructura para verificar que no hay fragmentación excesiva
+  if (estructura.length > 0) {
+    console.log(`   📊 Desglose de estructura:`);
+    estructura.forEach((sec, idx) => {
+      const duracionMs = parseTimeStringToMs(sec.fin) - parseTimeStringToMs(sec.inicio);
+      const duracionSeg = (duracionMs / 1000).toFixed(1);
+      console.log(`      ${idx + 1}. ${sec.tipo_seccion.padEnd(20)} ${sec.inicio} → ${sec.fin} (${duracionSeg}s)`);
+    });
+  }
+
   console.log(`   ✅ Vocales: ${vocalesClave.length} bloques`);
   console.log(`   ✅ Loops: ${loopsTransicion.length} candidatos`);
   console.log(`   ✅ Huecos: ${huecos.length} zonas instrumentales`);
-  console.log(`   ✅ Eventos DJ: ${eventosDj.length}`);
   console.log(`⚡ Completado en ${(Date.now() - inicio) / 1000}s`);
 
   // ============================================================================
   // MAPEO A TIPOS INTERNOS
   // ============================================================================
 
-  const estructuraTs: EstructuraMusical[] = estructura.map((item: any) => ({
-    tipo_seccion: mapSeccionToTipo(item.seccion),
-    inicio_ms: item.inicio_ms,
-    fin_ms: item.fin_ms,
-  }));
+  const estructuraTs: EstructuraMusical[] = estructura;
 
-  const eventosClaveDj: EventoClaveDJ[] = eventosDj
-    .map((evento: any) => {
-      const mapped = mapEventoDJ(evento.tipo);
-      if (!mapped) return null;
-      return {
-        evento: mapped,
-        inicio_ms: evento.tiempo_ms,
-        fin_ms: Math.min(evento.tiempo_ms + 8000, duracionMaxMs),
-      } satisfies EventoClaveDJ;
-    })
-    .filter((item: any): item is EventoClaveDJ => Boolean(item));
-
-  // Agregar loops como eventos "melodia_iconica"
-  const loopsComoEventos: EventoClaveDJ[] = loopsTransicion
-    .filter(l => l.score >= 7) // Solo loops con score alto
-    .map(l => ({
-      evento: 'melodia_iconica' as const,
-      inicio_ms: l.inicio_ms,
-      fin_ms: l.fin_ms,
-    }));
-
-  const analisisContenido: AnalisisContenido = {
-    analisis_lirico_tematico: {
-      tema_principal: '',
-      palabras_clave_semanticas: [],
-      evolucion_emocional: 'neutral',
-    },
-    eventos_clave_dj: [...eventosClaveDj, ...loopsComoEventos],
-    diagnostico_tecnico: {
-      resumen_segmentos_voz: `${vocalesClave.length} bloques vocales detectados`,
-      huecos_resumen: `${huecos.length} zonas instrumentales`
-    },
-  };
-
-  // ============================================================================
-  // RETURN COMPLETO
-  // ============================================================================
-
-  return {
-    id: '',
+  const resultadoFinal: CancionAnalizada = {
+    id: params.hash_archivo, // ID temporal
     hash_archivo: params.hash_archivo,
     titulo: params.titulo,
+    duracion_ms: duracionMaxMs,
     bpm: params.analisisTecnico.bpm,
     tonalidad_camelot: params.analisisTecnico.tonalidad_camelot,
     tonalidad_compatible: params.analisisTecnico.tonalidad_compatible,
-    energia: params.analisisTecnico.energia,
     bailabilidad: params.analisisTecnico.bailabilidad,
-    animo_general: params.analisisTecnico.animo_general,
     compas: params.analisisTecnico.compas,
-    duracion_ms: params.analisisTecnico.duracion_ms,
     beats_ts_ms: params.analisisTecnico.beats_ts_ms,
     downbeats_ts_ms: params.analisisTecnico.downbeats_ts_ms,
     frases_ts_ms: params.analisisTecnico.frases_ts_ms,
-    cue_points: [],
-    mix_in_point: null,
-    mix_out_point: null,
     vocales_clave: vocalesClave,
     loops_transicion: loopsTransicion,
     estructura_ts: estructuraTs,
-    analisis_contenido: analisisContenido,
-    presencia_vocal_ts: [],
-    analisis_espectral: null,
-    segmentos_voz: params.segmentosVoz,
     huecos_analizados: huecos,
-    fecha_procesado: new Date(),
-  } as CancionAnalizada;
+    fecha_procesado: new Date()
+  };
+
+  return resultadoFinal;
 }

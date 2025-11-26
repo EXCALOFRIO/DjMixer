@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { obtenerCancionPorHash, actualizarDatosGemini } from '@/lib/db-persistence';
 import { analizarConGeminiDJ } from '@/lib/gemini-optimizer';
-import type { CancionAnalizada, EstructuraMusical, AnalisisContenido, BloqueVocal, LoopTransicion } from '@/lib/db';
+import type { CancionAnalizada, EstructuraMusical, BloqueVocal, LoopTransicion } from '@/lib/db';
 import { GoogleGenAI } from '@google/genai';
 import { createHash } from 'crypto';
 import { writeFile, unlink, mkdir, readFile } from 'fs/promises';
@@ -59,7 +59,6 @@ interface GeminiEnriquecidoResponse {
   vocales_clave: BloqueVocal[];
   loops_transicion: LoopTransicion[];
   estructura: EstructuraMusical[];
-  analisis_contenido: AnalisisContenido;
   huecos: any[]; // AnalisisHuecoInstrumental
 }
 
@@ -288,18 +287,8 @@ export async function POST(request: NextRequest) {
       await cacheAudioBuffer({ hash, buffer, fileName, mimeType });
     }
 
-    type CancionExtendida = CancionAnalizada & {
-      segmentos_voz?: Array<{ start_ms: number; end_ms: number }>;
-    };
-
-    const cancionExtendida = cancion as CancionExtendida;
-    const segmentosVoz = Array.isArray(cancionExtendida.segmentos_voz)
-      ? cancionExtendida.segmentos_voz
-      : [];
-
-    console.log('🎯 Llamando a analizarConGeminiDJ con buffer inline:');
+    console.log('🎯 Llamando a analizarConGeminiDJ (análisis 100% Gemini, sin VAD):');
     console.log(`   - fileBuffer size: ${buffer.length} bytes`);
-    console.log(`   - segmentosVoz: ${segmentosVoz.length}`);
 
     const analisisCompleto = await analizarConGeminiDJ({
       hash_archivo: hash,
@@ -311,16 +300,14 @@ export async function POST(request: NextRequest) {
         bpm: cancion.bpm || 120,
         tonalidad_camelot: cancion.tonalidad_camelot || '1A',
         tonalidad_compatible: cancion.tonalidad_compatible || [],
-        energia: cancion.energia || 0.5,
         bailabilidad: cancion.bailabilidad || 0.5,
-        animo_general: cancion.animo_general || 'neutral',
         compas: cancion.compas || { numerador: 4, denominador: 4 },
         duracion_ms: cancion.duracion_ms || 180000,
         beats_ts_ms: cancion.beats_ts_ms || [],
         downbeats_ts_ms: cancion.downbeats_ts_ms || [],
         frases_ts_ms: cancion.frases_ts_ms || [],
       },
-      segmentosVoz,
+      // segmentosVoz eliminado - Gemini analiza el audio directamente
       nombreCancion: cancion.titulo || 'Desconocido',
     });
 
@@ -335,7 +322,6 @@ export async function POST(request: NextRequest) {
         vocales_clave: analisisCompleto.vocales_clave || undefined,
         loops_transicion: analisisCompleto.loops_transicion || undefined,
         estructura_ts: analisisCompleto.estructura_ts || undefined,
-        analisis_contenido: analisisCompleto.analisis_contenido || undefined,
         huecos_analizados: analisisCompleto.huecos_analizados || undefined,
       });
 
@@ -358,10 +344,6 @@ export async function POST(request: NextRequest) {
       vocales_clave: analisisCompleto.vocales_clave || [],
       loops_transicion: analisisCompleto.loops_transicion || [],
       estructura: analisisCompleto.estructura_ts || [],
-      analisis_contenido: analisisCompleto.analisis_contenido || {
-        analisis_lirico_tematico: { tema_principal: '', palabras_clave_semanticas: [], evolucion_emocional: 'neutral' },
-        eventos_clave_dj: []
-      },
       huecos: analisisCompleto.huecos_analizados || [],
     };
 
