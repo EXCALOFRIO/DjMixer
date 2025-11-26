@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { obtenerCancionPorHash, actualizarDatosGemini } from '@/lib/db-persistence';
 import { analizarConGeminiDJ } from '@/lib/gemini-optimizer';
-import type { CancionAnalizada, EstructuraMusical, BloqueVocal, LoopTransicion } from '@/lib/db';
+import type { CancionAnalizada, EstructuraMusical, BloqueVocal, LoopTransicion, TimelineSegment } from '@/lib/db';
 import { GoogleGenAI } from '@google/genai';
 import { createHash } from 'crypto';
 import { writeFile, unlink, mkdir, readFile } from 'fs/promises';
@@ -60,6 +60,7 @@ interface GeminiEnriquecidoResponse {
   loops_transicion: LoopTransicion[];
   estructura: EstructuraMusical[];
   huecos: any[]; // AnalisisHuecoInstrumental
+  timeline: TimelineSegment[];
 }
 
 // --- FUNCIONES AUXILIARES ---
@@ -319,19 +320,21 @@ export async function POST(request: NextRequest) {
 
       await actualizarDatosGemini({
         hash,
-        vocales_clave: analisisCompleto.vocales_clave || undefined,
+        timeline: analisisCompleto.timeline || undefined,
         loops_transicion: analisisCompleto.loops_transicion || undefined,
-        estructura_ts: analisisCompleto.estructura_ts || undefined,
-        huecos_analizados: analisisCompleto.huecos_analizados || undefined,
       });
 
       console.log('✅ Enriquecimiento guardado en BD exitosamente');
 
       // Marcar job como 100% completado
+      // Usar datos derivados del timeline para estadísticas
+      const timelineSegments = analisisCompleto.timeline || [];
+      const vocalesCount = timelineSegments.filter((t: any) => t.has_vocals).length;
+      
       await marcarJobCompletado(hash, {
         gemini_completed: true,
-        vocales: (analisisCompleto.vocales_clave || []).length,
-        secciones: (analisisCompleto.estructura_ts || []).length,
+        timeline_segments: timelineSegments.length,
+        vocales: vocalesCount,
         loops: (analisisCompleto.loops_transicion || []).length,
       });
 
@@ -345,6 +348,7 @@ export async function POST(request: NextRequest) {
       loops_transicion: analisisCompleto.loops_transicion || [],
       estructura: analisisCompleto.estructura_ts || [],
       huecos: analisisCompleto.huecos_analizados || [],
+      timeline: analisisCompleto.timeline || [],
     };
 
     return NextResponse.json({ success: true, hash, gemini: respuesta });

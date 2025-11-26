@@ -23,7 +23,7 @@ import * as path from 'path';
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
-const ENABLE_DEBUG_LOGGING = true;
+const ENABLE_DEBUG_LOGGING = false; // Deshabilitado para producción
 const DEBUG_LOG_DIR = path.join(process.cwd(), '.gemini', 'debug');
 
 // ============================================================================
@@ -271,98 +271,70 @@ export async function analizarConGeminiDJ(params: AnalisisGeminiParams): Promise
   console.log(`🎵 Análisis 100% Gemini (sin VAD - análisis puro de audio)`);
 
   // ============================================================================
-  // DJ-CENTRIC COMPACT SCHEMA
+  // UNIFIED TIMELINE SCHEMA (OPTIMIZADO)
   // ============================================================================
-  const djCompactSchema = {
+  const djUnifiedSchema = {
     type: 'object',
     properties: {
-      // Estructura: { s: start, e: end, c: code, ly: lyrics snippet }
-      s: {
+      // UNA SOLA LÍNEA DE TIEMPO
+      timeline: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
-            s: { type: 'string', description: "MM:SS.d" },
-            e: { type: 'string', description: "MM:SS.d" },
-            c: { type: 'string', enum: ['i', 'v', 'c', 'p', 's', 'o', 'b'] },
-            ly: { type: 'string', description: "Snippet de letra o 'instrumental'" }
+            s: { type: 'string', description: "Start MM:SS.d" },
+            e: { type: 'string', description: "End MM:SS.d" },
+            type: { type: 'string', enum: ['intro', 'verse', 'chorus', 'bridge', 'outro', 'instrumental', 'breakdown'] },
+            has_vocals: { type: 'boolean', description: "True if ANY vocals are present" },
+            desc: { type: 'string', description: "Lyrics snippet or instrument description" }
           },
-          required: ['s', 'e', 'c']
+          required: ['s', 'e', 'type', 'has_vocals']
         }
       },
-      // Vocales: { s: start, e: end, c: code }
-      v: {
+      // LOOPS: Los 10 mejores momentos para hacer loops de DJ
+      loops: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
-            s: { type: 'string', description: "MM:SS.d" },
-            e: { type: 'string', description: "MM:SS.d" },
-            c: { type: 'string', enum: ['v', 'c'] }
+            s: { type: 'string' },
+            e: { type: 'string' },
+            text: { type: 'string' }
           },
-          required: ['s', 'e', 'c']
-        }
-      },
-      // Loops: { s: start, e: end, t: text, sc: score }
-      l: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            s: { type: 'string', description: "MM:SS.d" },
-            e: { type: 'string', description: "MM:SS.d" },
-            t: { type: 'string' },
-            sc: { type: 'number' }
-          },
-          required: ['s', 'e', 't', 'sc']
-        }
-      },
-      // Eventos DJ: { t: time, c: code }
-      e: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            t: { type: 'string', description: "MM:SS.d" },
-            c: { type: 'string', enum: ['d', 'b', 'r', 'h'] }
-          },
-          required: ['t', 'c']
-        }
+          required: ['s', 'e', 'text']
+        },
+        maxItems: 10
       }
     },
-    required: ['s', 'v', 'l', 'e']
+    required: ['timeline', 'loops']
   };
 
   // ============================================================================
-  // PROMPT ULTRA-OPTIMIZADO - REMIX FRIENDLY
+  // PROMPT UNIFICADO - TODO EN UNO (OPTIMIZADO)
   // ============================================================================
-  const prompt = `ERES UN EXPERTO EN TEORÍA MUSICAL Y DJ PROFESIONAL.
-Analiza esta canción (Duración: ${durationSec}s, BPM: ${params.analisisTecnico.bpm}).
+  const prompt = `ANALISTA MUSICAL EXPERTO.
+Canción: ${durationSec}s de duración. BPM: ${params.analisisTecnico.bpm}.
 
-TU OBJETIVO: Definir la MACRO-ESTRUCTURA musical y los puntos de mezcla.
+OBJETIVO: Crear una LÍNEA DE TIEMPO ÚNICA y contigua desde 00:00 hasta el final exacto.
 
-IMPORTANTE SOBRE LA ESTRUCTURA ("s"):
-1. NO FRAGMENTES SECCIONES: Un "Verso" o un "Coro" son bloques largos (16-64 compases).
-2. IGNORA SILENCIOS CORTOS (< 4s) dentro de una misma sección. Si el cantante respira, la sección CONTINÚA.
-3. DETECTA EL CORO (ESTRIBILLO): Es la parte más energética, repetitiva y suele contener el título de la canción.
-4. DIFERENCIA: "Pre-Coro" (preparación) vs "Coro" (explosión).
+INSTRUCCIONES CRÍTICAS:
+1. COBERTURA TOTAL: No dejes huecos. El fin de un segmento es el inicio del siguiente.
+2. OUTRO REAL: ¡Cuidado! Muchas canciones tienen voces hasta el último segundo. NO marques "instrumental/outro" largo al final a menos que estés 100% seguro de que la voz desaparece totalmente.
+3. LOGICA DJ: 
+   - "intro": Inicio instrumental (seguro para mezclar).
+   - "verse": Energía media, historia.
+   - "chorus": Energía alta, repetitivo (Estribillo).
+   - "bridge": Cambio de ritmo/melodía.
+   - "breakdown": Bajón sin bombos.
+   - "outro": Final de la canción.
+4. HAS_VOCALS: Marca "true" si hay CUALQUIER tipo de voz (canto, rap, adlibs, chops). Solo usa "false" para instrumental puro.
+5. DESC: Escribe 3-4 palabras de la letra si hay voz, o describe los instrumentos si es instrumental.
 
-FORMATO JSON REQUERIDO:
+Responde JSON con:
+- "timeline": Lista ordenada de secciones.
+- "loops": Los 10 MEJORES momentos para loops de DJ (frases pegadizas de 2-8s).
 
-"s" (Estructura MACRO): Bloques musicales COMPLETOS.
-   - Códigos: "i"(intro), "v"(verso), "p"(pre-coro/puente), "c"(coro/estribillo), "s"(solo/inst), "o"(outro).
-   - "ly": Escribe 3-4 palabras de la letra que suenen ahí para identificar la sección.
-
-"v" (Voz Real): Aquí SÍ sé preciso con los silencios.
-   - Marca exactamente cuándo hay voz y cuándo hay hueco instrumental.
-
-"l" (Loops de Mezcla): Frases pegadizas de 1 a 4 compases (aprox 2-8 seg).
-   - Ideal para hacer loops antes de un drop o cambio.
-
-"e" (Eventos): Cambios bruscos de energía.
-   - "d"(drop), "b"(breakdown/bajón).
-
-RESPONDE SOLO JSON. USA FORMATO "MM:SS.d".`;
+USA FORMATO "MM:SS.d" (Ej: "01:30.5", "02:45.2").`;
 
   console.log('\n📝 Enviando prompt DJ-céntrico a Gemini...');
 
@@ -407,7 +379,7 @@ RESPONDE SOLO JSON. USA FORMATO "MM:SS.d".`;
           topK: 40,
           maxOutputTokens: 65536,
           responseMimeType: 'application/json',
-          responseJsonSchema: djCompactSchema,
+          responseJsonSchema: djUnifiedSchema,
         }
       });
 
@@ -489,212 +461,115 @@ RESPONDE SOLO JSON. USA FORMATO "MM:SS.d".`;
     resultado = {}; // Esto activará los fallbacks
   }
 
-  console.log('\n📊 Procesando respuesta DJ-céntrica...');
+  console.log('\n📊 Procesando respuesta con Timeline Unificado...');
 
-  // Diccionarios para traducir los códigos cortos a tus tipos DB
-  const mapTipoEst: Record<string, EstructuraMusical['tipo_seccion']> = { i: 'intro', v: 'verso', c: 'estribillo', p: 'puente', s: 'solo_instrumental', o: 'outro', b: 'subidon_build_up' };
-  const mapTipoVoc: Record<string, BloqueVocal['tipo']> = { v: 'bloque_verso', c: 'bloque_coro' };
-
-  // 1. Convertir estructura (segundos → ms) y CORREGIR ALUCINACIONES
-  let estructuraTemp = (resultado.s || []).map((item: any) => {
-    const inicioMs = Math.min(parseTimeStringToMs(item.s), duracionMaxMs);
-    const finMs = Math.min(parseTimeStringToMs(item.e), duracionMaxMs);
-    let seccion = mapTipoEst[item.c] || 'verso';
-
-    // Sin validación VAD - confiamos 100% en Gemini
-    return {
-      tipo_seccion: seccion,
-      inicio_ms: inicioMs,
-      fin_ms: finMs
-    };
-  }).filter((s: any) => s.inicio_ms < s.fin_ms)
-    .sort((a: any, b: any) => a.inicio_ms - b.inicio_ms);
+  // Mapeo de tipos del timeline a tipos de DB
+  const mapTipoTimeline: Record<string, EstructuraMusical['tipo_seccion']> = {
+    intro: 'intro',
+    verse: 'verso',
+    chorus: 'estribillo',
+    bridge: 'puente',
+    outro: 'outro',
+    instrumental: 'solo_instrumental',
+    breakdown: 'subidon_build_up'
+  };
 
   // ============================================================================
-  // FUSIÓN INTELIGENTE (INTELLIGENT MERGING)
+  // 1. PROCESAR TIMELINE UNIFICADO
   // ============================================================================
-  // Si hay dos secciones del mismo tipo separadas por menos de 6 segundos,
-  // son probablemente la misma sección fragmentada por Gemini.
-  // Esto resuelve el problema de "5 versos de 10s" → "1 verso de 50s"
+  let timelineRaw = (resultado.timeline || []).map((item: any) => ({
+    start_ms: Math.min(parseTimeStringToMs(item.s), duracionMaxMs),
+    end_ms: Math.min(parseTimeStringToMs(item.e), duracionMaxMs),
+    type: item.type,
+    has_vocals: Boolean(item.has_vocals),
+    desc: item.desc || ''
+  })).sort((a: any, b: any) => a.start_ms - b.start_ms);
 
-  const estructuraMerged: any[] = [];
-  let fusionesRealizadas = 0;
-
-  if (estructuraTemp.length > 0) {
-    let actual = { ...estructuraTemp[0] };
-
-    for (let i = 1; i < estructuraTemp.length; i++) {
-      const siguiente = estructuraTemp[i];
-      const gap = siguiente.inicio_ms - actual.fin_ms;
-
-      // Reglas para fusionar:
-      // 1. Mismo tipo de sección
-      // 2. El hueco entre ellas es pequeño (< 6 segundos, aproximadamente 2-3 compases)
-      if (actual.tipo_seccion === siguiente.tipo_seccion && gap < 6000) {
-        // FUSIONAR: Extendemos el final del bloque actual
-        console.log(`🔗 Fusionando "${actual.tipo_seccion}": ${formatTimeForPrompt(actual.inicio_ms)}-${formatTimeForPrompt(actual.fin_ms)} + ${formatTimeForPrompt(siguiente.inicio_ms)}-${formatTimeForPrompt(siguiente.fin_ms)} (gap: ${(gap / 1000).toFixed(1)}s)`);
-        actual.fin_ms = siguiente.fin_ms;
-        fusionesRealizadas++;
-      } else {
-        // NO FUSIONAR: Guardar el bloque actual y empezar uno nuevo
-        estructuraMerged.push(actual);
-        actual = { ...siguiente };
-      }
+  // CORRECCIÓN DE FINAL: Asegurar que el último segmento llega al final real
+  if (timelineRaw.length > 0) {
+    const ultimo = timelineRaw[timelineRaw.length - 1];
+    if (Math.abs(ultimo.end_ms - duracionMaxMs) > 2000) {
+      console.log(`🔧 Extendiendo último segmento de ${formatTimeForPrompt(ultimo.end_ms)} a ${duracionFormatted}`);
+      ultimo.end_ms = duracionMaxMs;
     }
-    estructuraMerged.push(actual); // Guardar el último bloque
   }
 
-  // Reemplazar estructuraTemp con la versión fusionada
-  if (fusionesRealizadas > 0) {
-    console.log(`✨ Fusión inteligente completada: ${fusionesRealizadas} fusiones realizadas`);
-    console.log(`   Secciones antes: ${estructuraTemp.length} → después: ${estructuraMerged.length}`);
-    estructuraTemp = estructuraMerged;
-  }
-
-  // FALLBACK ESTRUCTURA: Si Gemini falló y el array está vacío
-  if (estructuraTemp.length === 0) {
-    console.warn('⚠️ Gemini no devolvió estructura. Generando estructura básica.');
-    estructuraTemp = [
-      { tipo_seccion: 'intro', inicio_ms: 0, fin_ms: 15000 },
-      { tipo_seccion: 'verso', inicio_ms: 15000, fin_ms: duracionMaxMs - 15000 },
-      { tipo_seccion: 'outro', inicio_ms: duracionMaxMs - 15000, fin_ms: duracionMaxMs }
+  // FALLBACK: Si Gemini no devolvió timeline
+  if (timelineRaw.length === 0) {
+    console.warn('⚠️ Gemini no devolvió timeline. Generando timeline básico.');
+    timelineRaw = [
+      { start_ms: 0, end_ms: 15000, type: 'intro', has_vocals: false, desc: 'Instrumental intro' },
+      { start_ms: 15000, end_ms: duracionMaxMs - 15000, type: 'verse', has_vocals: true, desc: 'Main content' },
+      { start_ms: duracionMaxMs - 15000, end_ms: duracionMaxMs, type: 'outro', has_vocals: false, desc: 'Instrumental outro' }
     ];
   }
 
-  // Fix: El último segmento debe terminar exactamente en duracionMaxMs
-  if (estructuraTemp.length > 0) {
-    estructuraTemp[estructuraTemp.length - 1].fin_ms = duracionMaxMs;
-  }
-
-  // Map to final string format
-  const estructura: EstructuraMusical[] = estructuraTemp.map((s: any) => ({
-    tipo_seccion: s.tipo_seccion,
-    inicio: formatTimeForPrompt(s.inicio_ms),
-    fin: formatTimeForPrompt(s.fin_ms)
+  // Guardar timeline en formato DB
+  const timeline: any[] = timelineRaw.map((t: any) => ({
+    inicio: formatTimeForPrompt(t.start_ms),
+    fin: formatTimeForPrompt(t.end_ms),
+    tipo_seccion: mapTipoTimeline[t.type] || 'verso',
+    has_vocals: t.has_vocals,
+    descripcion: t.desc
   }));
 
-  // 2. Convertir vocales (timestamps directos de Gemini)
-  let vocalesTemp = (resultado.v || []).map((item: any) => {
-    const rawStart = parseTimeStringToMs(item.s);
-    const rawEnd = parseTimeStringToMs(item.e);
+  console.log(`✅ Timeline: ${timeline.length} segmentos (cobertura: 0:0.0 → ${duracionFormatted})`);
 
-    return {
-      tipo: mapTipoVoc[item.c] || 'bloque_verso',
-      inicio_ms: Math.min(rawStart, duracionMaxMs),
-      fin_ms: Math.min(rawEnd, duracionMaxMs),
-    };
-  })
-    // Filtro: Rechazar bloques muy cortos (< 2s) excepto si son muy largos (safety)
-    .filter((v: any) => (v.fin_ms - v.inicio_ms) >= 2000);
-
-  // Sin fallback VAD - confiamos 100% en lo que Gemini detectó
-  // Si Gemini no detectó vocales, respetamos esa decisión
-
-  const vocalesClave: BloqueVocal[] = vocalesTemp.map((v: any) => ({
-    tipo: v.tipo,
-    inicio: formatTimeForPrompt(v.inicio_ms),
-    fin: formatTimeForPrompt(v.fin_ms)
+  // ============================================================================
+  // 2. DERIVAR ESTRUCTURA del Timeline
+  // ============================================================================
+  const estructura: EstructuraMusical[] = timeline.map(t => ({
+    tipo_seccion: t.tipo_seccion,
+    inicio: t.inicio,
+    fin: t.fin
   }));
 
-  console.log(`✅ Vocales detectadas: ${vocalesClave.length} bloques`);
-  if (vocalesClave.length > 0) {
-    console.log(`   Primer bloque: ${vocalesClave[0].inicio} - ${vocalesClave[0].fin} (${vocalesClave[0].tipo})`);
-  }
+  // ============================================================================
+  // 3. DERIVAR VOCALES del Timeline (filtrar has_vocals === true)
+  // ============================================================================
+  const vocalesClave: BloqueVocal[] = timelineRaw
+    .filter((t: any) => t.has_vocals === true)
+    .map((t: any) => ({
+      // Si es chorus o hook -> bloque_coro, si no -> bloque_verso
+      tipo: (t.type === 'chorus' || t.type === 'hook') ? 'bloque_coro' : 'bloque_verso',
+      inicio: formatTimeForPrompt(t.start_ms),
+      fin: formatTimeForPrompt(t.end_ms)
+    }));
 
-  // 3. Convertir loops
-  let loopsTemp = (resultado.l || []).map((item: any) => ({
-    inicio_ms: Math.min(parseTimeStringToMs(item.s), duracionMaxMs),
-    fin_ms: Math.min(parseTimeStringToMs(item.e), duracionMaxMs),
-    texto: item.t || '',
-    score: Math.max(1, Math.min(10, Number(item.sc) || 5))
-  })).filter((l: any) => l.inicio_ms < l.fin_ms);
+  console.log(`✅ Vocales: ${vocalesClave.length} bloques`);
 
-  // 4. Eventos DJ eliminados (campo eventos_clave_dj ya no se usa)
-
-  // 5. Recalcular huecos instrumentales basándonos en vocales_clave (Usando vocalesTemp que tiene MS)
-  const huecos: HuecoInstrumental[] = [];
-  if (vocalesTemp.length > 0) {
-    const sorted = [...vocalesTemp].sort((a: any, b: any) => a.inicio_ms - b.inicio_ms);
-    // Inicio
-    if (sorted[0].inicio_ms > 4000) {
-      huecos.push({
-        inicio: formatTimeForPrompt(0),
-        fin: formatTimeForPrompt(sorted[0].inicio_ms),
-        tipo: 'instrumental_puro'
-      });
-    }
-    // Medio
-    for (let i = 0; i < sorted.length - 1; i++) {
-      const gap = sorted[i + 1].inicio_ms - sorted[i].fin_ms;
-      if (gap > 3000) {
-        huecos.push({
-          inicio: formatTimeForPrompt(sorted[i].fin_ms),
-          fin: formatTimeForPrompt(sorted[i + 1].inicio_ms),
-          tipo: 'instrumental_puro'
-        });
-      }
-    }
-    // Final
-    if (duracionMaxMs - sorted[sorted.length - 1].fin_ms > 4000) {
-      huecos.push({
-        inicio: formatTimeForPrompt(sorted[sorted.length - 1].fin_ms),
-        fin: formatTimeForPrompt(duracionMaxMs),
-        tipo: 'instrumental_puro'
-      });
-    }
-  } else {
-    huecos.push({
-      inicio: formatTimeForPrompt(0),
-      fin: formatTimeForPrompt(duracionMaxMs),
+  // ============================================================================
+  // 4. DERIVAR HUECOS del Timeline (filtrar has_vocals === false)
+  // ============================================================================
+  const huecos: HuecoInstrumental[] = timelineRaw
+    .filter((t: any) => t.has_vocals === false)
+    .map((t: any) => ({
+      inicio: formatTimeForPrompt(t.start_ms),
+      fin: formatTimeForPrompt(t.end_ms),
       tipo: 'instrumental_puro'
-    });
-  }
+    }));
 
-  // FALLBACK: Si Gemini no encontró loops, o encontró muy pocos,
-  // creamos loops instrumentales "seguros" basados en los huecos detectados.
-  if (loopsTemp.length < 2) {
-    huecos.forEach(hueco => {
-      const inicioMs = parseTimeStringToMs(hueco.inicio);
-      const finMs = parseTimeStringToMs(hueco.fin);
-      const duracion = finMs - inicioMs;
-
-      // Si el hueco dura más de 8 segundos (aprox 4 compases a 120bpm)
-      if (duracion >= 8000) {
-        // Crear un loop al final del hueco (ideal para mezclar salida)
-        loopsTemp.push({
-          texto: "Loop Instrumental (Safety)", // Marcador especial
-          inicio_ms: finMs - 4000, // Últimos 4 seg
-          fin_ms: finMs,
-          score: 8 // Score alto porque es instrumental puro = fácil de mezclar
-        });
-      }
-    });
-  }
-
-  // Ordenar loops por tiempo
-  loopsTemp.sort((a: any, b: any) => a.inicio_ms - b.inicio_ms);
-
-  const loopsTransicion: LoopTransicion[] = loopsTemp.map((l: any) => ({
-    texto: l.texto,
-    inicio: formatTimeForPrompt(l.inicio_ms),
-    fin: formatTimeForPrompt(l.fin_ms),
-    score: l.score
-  }));
+  // ============================================================================
+  // 5. PROCESAR LOOPS (máximo 10, sin score)
+  // ============================================================================
+  const loopsTransicion: LoopTransicion[] = (resultado.loops || [])
+    .map((item: any) => ({
+      inicio_ms: Math.min(parseTimeStringToMs(item.s), duracionMaxMs),
+      fin_ms: Math.min(parseTimeStringToMs(item.e), duracionMaxMs),
+      texto: item.text || ''
+    }))
+    .filter((l: any) => l.inicio_ms < l.fin_ms)
+    .slice(0, 10) // Máximo 10 loops
+    .sort((a: any, b: any) => a.inicio_ms - b.inicio_ms)
+    .map((l: any) => ({
+      texto: l.texto,
+      inicio: formatTimeForPrompt(l.inicio_ms),
+      fin: formatTimeForPrompt(l.fin_ms)
+    }));
 
   // Validación
   console.log(`✅ Análisis DJ completado:`);
   console.log(`   ✅ Estructura: ${estructura.length} secciones`);
-
-  // Mostrar resumen de estructura para verificar que no hay fragmentación excesiva
-  if (estructura.length > 0) {
-    console.log(`   📊 Desglose de estructura:`);
-    estructura.forEach((sec, idx) => {
-      const duracionMs = parseTimeStringToMs(sec.fin) - parseTimeStringToMs(sec.inicio);
-      const duracionSeg = (duracionMs / 1000).toFixed(1);
-      console.log(`      ${idx + 1}. ${sec.tipo_seccion.padEnd(20)} ${sec.inicio} → ${sec.fin} (${duracionSeg}s)`);
-    });
-  }
-
   console.log(`   ✅ Vocales: ${vocalesClave.length} bloques`);
   console.log(`   ✅ Loops: ${loopsTransicion.length} candidatos`);
   console.log(`   ✅ Huecos: ${huecos.length} zonas instrumentales`);
@@ -703,8 +578,6 @@ RESPONDE SOLO JSON. USA FORMATO "MM:SS.d".`;
   // ============================================================================
   // MAPEO A TIPOS INTERNOS
   // ============================================================================
-
-  const estructuraTs: EstructuraMusical[] = estructura;
 
   const resultadoFinal: CancionAnalizada = {
     id: params.hash_archivo, // ID temporal
@@ -719,9 +592,10 @@ RESPONDE SOLO JSON. USA FORMATO "MM:SS.d".`;
     beats_ts_ms: params.analisisTecnico.beats_ts_ms,
     downbeats_ts_ms: params.analisisTecnico.downbeats_ts_ms,
     frases_ts_ms: params.analisisTecnico.frases_ts_ms,
+    timeline: timeline, // NUEVO
     vocales_clave: vocalesClave,
     loops_transicion: loopsTransicion,
-    estructura_ts: estructuraTs,
+    estructura_ts: estructura,
     huecos_analizados: huecos,
     fecha_procesado: new Date()
   };

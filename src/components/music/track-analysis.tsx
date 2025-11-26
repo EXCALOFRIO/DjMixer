@@ -103,7 +103,7 @@ export function TrackAnalysis({ analisis }: TrackAnalysisProps) {
         <Card>
           <CardHeader>
             <CardTitle>Loops de Transición</CardTitle>
-            <CardDescription>Frases ideales para mezclar</CardDescription>
+            <CardDescription>Los mejores momentos para mezclar</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
@@ -111,7 +111,7 @@ export function TrackAnalysis({ analisis }: TrackAnalysisProps) {
                 <div key={i} className="p-2 bg-muted rounded">
                   <div className="flex items-center justify-between text-sm mb-1">
                     <span className="font-medium">{loop.texto}</span>
-                    <span className="text-xs text-muted-foreground">Score: {loop.score}/10</span>
+                    <span className="text-xs text-muted-foreground">#{i + 1}</span>
                   </div>
                   <div className="text-xs text-muted-foreground">
                     {loop.inicio} - {loop.fin}

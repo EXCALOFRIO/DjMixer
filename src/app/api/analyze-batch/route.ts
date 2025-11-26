@@ -244,17 +244,15 @@ async function procesarCancionConGemini(
 
     console.log(`   ✅ Análisis Gemini completado`);
 
-    // Actualizar base de datos
+    // Actualizar base de datos (solo timeline y loops)
     const { actualizarDatosGemini } = await import('@/lib/db-persistence');
     await actualizarDatosGemini({
       hash: tarea.hash,
-      vocales_clave: datosGemini.vocales_clave,
+      timeline: datosGemini.timeline,
       loops_transicion: datosGemini.loops_transicion,
-      estructura_ts: datosGemini.estructura_ts,
-      huecos_analizados: datosGemini.huecos_analizados,
     });
 
-    console.log(`   💾 Datos Gemini guardados\n`);
+    console.log(`   💾 Datos Gemini guardados (timeline unificado)\n`);
 
   } catch (error: any) {
     console.error(`   ❌ Error Gemini:`, error.message);
