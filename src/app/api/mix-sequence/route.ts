@@ -83,33 +83,42 @@ export async function POST(request: NextRequest) {
     }
 
     // 5. Retornar resultado
+    // IMPORTANTE: Cada track necesita saber:
+    // - startPointMs: donde ESTA canción empieza a sonar (entry point de la transición anterior)
+    // - exitPointMs: donde ESTA canción termina (exit point de la transición a la siguiente)
+    // - nextEntryPointMs: donde la SIGUIENTE canción empezará (para el crossfade)
     return NextResponse.json({
       session: {
         tracks: session.tracks.map((st, index) => {
-          // For the first track, we need to extract the exit point from the NEXT track's transition
-          // because the transition object represents "transition FROM previous TO current"
-          let transition = null;
-
+          const nextTrack = session.tracks[index + 1];
+          
+          // startPointMs: donde empieza ESTA canción
+          // - Para la primera: 0 o el bestEntryPoint más alto
+          // - Para las demás: el entryPoint de la transición que nos trajo aquí
+          let startPointMs = 0;
           if (st.transition) {
-            // Normal case: track has a transition (from previous track)
-            transition = {
-              type: st.transition.type,
-              exitPointMs: st.transition.exitPoint.pointMs,
-              entryPointMs: st.transition.entryPoint.pointMs,
-              score: st.transition.score,
-              description: st.transition.description,
-            };
-          } else if (index === 0 && session.tracks.length > 1 && session.tracks[1].transition) {
-            // Special case: first track doesn't have a transition object,
-            // but we can extract the exit point from the second track's transition
-            const nextTrackTransition = session.tracks[1].transition!;
-            transition = {
-              type: nextTrackTransition.type,
-              exitPointMs: nextTrackTransition.exitPoint.pointMs,
-              entryPointMs: 0, // First track starts from beginning
-              score: nextTrackTransition.score,
-              description: `START ➔ ${nextTrackTransition.description.split('➔')[1]?.trim() || 'NEXT'}`,
-            };
+            // Esta canción empieza donde la transición anterior dijo
+            startPointMs = st.transition.entryPoint.pointMs;
+          }
+          
+          // exitPointMs: donde termina ESTA canción
+          // - Si hay transición a la siguiente: el exitPoint de esa transición
+          // - Si no: fin de la canción
+          let exitPointMs = st.track.duracion_ms;
+          let nextEntryPointMs = 0;
+          let transitionType = 'CUT';
+          let transitionDescription = '';
+          let transitionScore = 0;
+          
+          if (nextTrack?.transition) {
+            // La transición del SIGUIENTE track contiene:
+            // - exitPoint: donde ESTA canción sale
+            // - entryPoint: donde la SIGUIENTE canción entra
+            exitPointMs = nextTrack.transition.exitPoint.pointMs;
+            nextEntryPointMs = nextTrack.transition.entryPoint.pointMs;
+            transitionType = nextTrack.transition.type;
+            transitionDescription = nextTrack.transition.description;
+            transitionScore = nextTrack.transition.score;
           }
 
           return {
@@ -122,7 +131,14 @@ export async function POST(request: NextRequest) {
               key: st.track.tonalidad_camelot,
               durationMs: st.track.duracion_ms,
             },
-            transition,
+            transition: {
+              type: transitionType,
+              startPointMs,     // Donde ESTA canción empieza
+              exitPointMs,      // Donde ESTA canción sale
+              entryPointMs: nextEntryPointMs, // Donde la SIGUIENTE canción entra
+              score: transitionScore,
+              description: transitionDescription,
+            },
             transitionScore: st.transitionScore,
           };
         }),

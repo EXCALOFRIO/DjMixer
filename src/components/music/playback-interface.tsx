@@ -96,16 +96,45 @@ const ProgressRing = ({
   stroke,
   progress,
   className,
-  onSeek
+  onSeek,
+  trackIndex
 }: {
   radius: number;
   stroke: number;
   progress: number;
   className?: string;
   onSeek: (progress: number) => void;
+  trackIndex?: number;
 }) => {
   const ringRef = useRef<SVGSVGElement>(null);
   const isSeeking = useRef(false);
+  const prevProgressRef = useRef(progress);
+  const prevTrackIndexRef = useRef(trackIndex);
+  const [disableTransition, setDisableTransition] = useState(false);
+
+  // Detectar cambio de canción para deshabilitar transición temporalmente
+  useEffect(() => {
+    const prevProgress = prevProgressRef.current;
+    const prevTrackIndex = prevTrackIndexRef.current;
+    
+    // Si el trackIndex cambió o el progreso bajó significativamente (>50%), 
+    // es un cambio de canción - deshabilitar transición
+    const isTrackChange = trackIndex !== prevTrackIndex;
+    const isProgressReset = prevProgress > 50 && progress < 50;
+    
+    if (isTrackChange || isProgressReset) {
+      setDisableTransition(true);
+      // Re-habilitar transición después de un frame
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setDisableTransition(false);
+        });
+      });
+    }
+    
+    prevProgressRef.current = progress;
+    prevTrackIndexRef.current = trackIndex;
+  }, [progress, trackIndex]);
 
   const handleSeek = (e: React.MouseEvent<SVGSVGElement> | React.TouchEvent<SVGSVGElement> | MouseEvent | TouchEvent) => {
     if (!ringRef.current || !radius) return;
@@ -226,7 +255,10 @@ const ProgressRing = ({
         fill="transparent"
         strokeWidth={stroke}
         strokeDasharray={circumference + " " + circumference}
-        style={{ strokeDashoffset, transition: "stroke-dashoffset 0.5s linear" }}
+        style={{ 
+          strokeDashoffset, 
+          transition: disableTransition ? "none" : "stroke-dashoffset 0.3s linear" 
+        }}
         strokeLinecap="round"
         r={normalizedRadius}
         cx={radius}
@@ -296,7 +328,9 @@ export function PlaybackInterface({ tracks, volume, mixPlan, mixSequence }: Play
     isPlaying,
     currentTrackIndex,
     currentTime,
-    duration,
+    startPointMs: playerStartPointMs,
+    exitPointMs: playerExitPointMs,
+    effectiveDurationMs: playerEffectiveDurationMs,
     togglePlay,
     seek,
     skipNext,
@@ -321,28 +355,19 @@ export function PlaybackInterface({ tracks, volume, mixPlan, mixSequence }: Play
   const prevSequenceItem = sequenceTracks.length > 1 ? sequenceTracks[prevTrackIndex] : null;
 
   // Calculate effective start and end points for the progress bar
-  // IMPORTANT: currentSequenceItem.transition contains BOTH:
-  // - entryPointMs: Where THIS track starts playing (not from 0)
-  // - exitPointMs: Where THIS track exits and transitions to next
-
-  const trackRealDurationMs = (currentTrack as any)?.durationMs || (currentTrack?.duration * 1000) || 0;
-
-  // Sanitization Logic
-  const rawExitPointMs = currentSequenceItem?.transition?.exitPointMs || trackRealDurationMs;
-  const safeExitPointMs = Math.min(rawExitPointMs, trackRealDurationMs);
-  const safeEntryPointMs = currentSequenceItem?.transition?.entryPointMs || 0;
-
-  // Effective Duration (the "playable window" of this track)
-  const effectiveDurationMs = safeExitPointMs - safeEntryPointMs;
+  // Usar los valores directamente del player
+  const safeStartPointMs = playerStartPointMs || 0;
+  const safeExitPointMs = playerExitPointMs || (currentTrack?.duration * 1000) || 0;
+  const effectiveDurationMs = playerEffectiveDurationMs || Math.max(1, safeExitPointMs - safeStartPointMs);
 
   const currentTimeMs = currentTime * 1000;
 
-  // Progress: 0% when at entry point, 100% when at exit point
+  // Progress: 0% cuando está en startPoint, 100% cuando está en exitPoint
   const normalizedProgress = effectiveDurationMs > 0
-    ? Math.min(100, Math.max(0, ((currentTimeMs - safeEntryPointMs) / effectiveDurationMs) * 100))
+    ? Math.min(100, Math.max(0, ((currentTimeMs - safeStartPointMs) / effectiveDurationMs) * 100))
     : 0;
 
-  // Countdown: Time from effective current position to exit
+  // Countdown: Tiempo restante hasta el exitPoint
   const timeRemainingMs = Math.max(0, safeExitPointMs - currentTimeMs);
   const timeRemainingSec = Math.max(0, Math.ceil(timeRemainingMs / 1000));
 
@@ -385,8 +410,8 @@ export function PlaybackInterface({ tracks, volume, mixPlan, mixSequence }: Play
   }, []);
 
   const handleSeek = (progress: number) => {
-    // Seek within the effective window
-    const seekTimeMs = safeEntryPointMs + ((progress / 100) * effectiveDurationMs);
+    // Seek within the effective window (from startPoint to exitPoint)
+    const seekTimeMs = safeStartPointMs + ((progress / 100) * effectiveDurationMs);
     seek(seekTimeMs / 1000);
   };
 
@@ -426,7 +451,13 @@ export function PlaybackInterface({ tracks, volume, mixPlan, mixSequence }: Play
             <PlaylistRing tracks={displayTracks} currentTrackIndex={currentTrackIndex} radius={ringSizes.outer} stroke={12} className="opacity-50" />
           </div>
           <div className="absolute inset-0 flex items-center justify-center">
-            <ProgressRing radius={ringSizes.inner} stroke={4} progress={normalizedProgress} onSeek={handleSeek} />
+            <ProgressRing 
+              radius={ringSizes.inner} 
+              stroke={4} 
+              progress={normalizedProgress} 
+              onSeek={handleSeek} 
+              trackIndex={currentTrackIndex}
+            />
           </div>
 
           <div className={cn("relative rounded-full overflow-hidden shadow-2xl bg-black w-[70%] aspect-square transition-all duration-500",

@@ -1,20 +1,27 @@
 /**
- * Algoritmo A* para secuenciar canciones en una sesión DJ óptima
+ * MIX SEQUENCER - Algoritmo A* para Secuenciación DJ
+ * Adaptado para Timeline Unificado de Gemini
+ * 
+ * Encuentra la secuencia óptima de canciones usando:
+ * - Compatibilidad armónica (Camelot Wheel)
+ * - Compatibilidad de BPM
+ * - Puntuación de transición (calculada desde timeline)
  */
 
 import type { CancionAnalizada } from './db';
 import type { MixPlanEntry } from './mix-planner';
 import { findBestTransition, type TransitionResult } from './mix-transitions';
 
-// Pesos ajustados para dar flexibilidad
-const W_TONALIDAD = 0.30;
-const W_BPM = 0.30;
-const W_MEZCLA = 0.40;
-// Valores configurables
-const VARIETY_PENALTY_TYPE = 25; // Penalización por repetir el mismo tipo de transición
-const VARIETY_PENALTY_STRATEGY = 15; // Penalización por repetir misma estrategia de salida
-const DROP_SWAP_HARMONIC_THRESHOLD = 80; // Umbral armónico para considerar un DROP_SWAP seguro
-const DROP_SWAP_HARMONIC_PENALIZED_SCORE = 10; // Score penalizado para DROP_SWAP disonante
+// Pesos para scoring
+const W_BPM = 0.25;
+const W_HARMONIC = 0.25;
+const W_MIX = 0.50;
+
+// Configuración de variedad
+const VARIETY_PENALTY_TYPE = 25;
+const VARIETY_PENALTY_STRATEGY = 15;
+const DROP_SWAP_HARMONIC_THRESHOLD = 80;
+const DROP_SWAP_HARMONIC_PENALIZED_SCORE = 10;
 
 export interface SequencedTrack {
   track: CancionAnalizada;
@@ -105,7 +112,8 @@ function calculateEnergyScore(eA?: number | null, eB?: number | null): number {
 }
 
 /**
- * Calcula la puntuación total de una transición entre dos tracks (Tolerante a fallos)
+ * Calcula la puntuación total de una transición entre dos tracks
+ * Usa los mix plans generados desde el timeline unificado
  */
 export function calculateTransitionScore(
   trackA: CancionAnalizada,
@@ -114,22 +122,17 @@ export function calculateTransitionScore(
   mixPlanB: MixPlanEntry
 ): { score: number; transition: TransitionResult | null } {
 
-  // 1. BPM Score (Con tolerancia)
+  // 1. BPM Score
   const bpmScore = calculateBPMScore(trackA.bpm, trackB.bpm);
 
   // 2. Harmonic Score
   const harmonicScore = calculateHarmonicScore(trackA, trackB);
 
-  // 3. Energy Flow (DESACTIVADO - Campo eliminado)
-  const energyScore = 50;
-
-  // 4. Mix Transition Score (Usando la nueva lógica de estrategias)
+  // 3. Mix Transition Score (desde timeline unificado)
   const mixResult = findBestTransition(trackA, mixPlanA.bestExitPoints, trackB, mixPlanB.bestEntryPoints);
-
-  // Si findBestTransition devuelve null (raro con el fallback), penalizar pero no morir
   const mixScore = mixResult ? mixResult.score : 0;
 
-  // God-mode guard: si vamos a hacer DROP_SWAP doble y la armonía es mala, penalizamos duro
+  // Penalizar DROP_SWAP doble con mala armonía
   if (
     mixResult &&
     mixResult.exitPoint.strategy === 'DROP_SWAP' &&
@@ -139,11 +142,11 @@ export function calculateTransitionScore(
     return { score: DROP_SWAP_HARMONIC_PENALIZED_SCORE, transition: mixResult };
   }
 
-  // Ponderación Final Reajustada para PRIORIZAR LA MEZCLA
+  // Ponderación Final
   const total =
-    (bpmScore * 0.25) +
-    (harmonicScore * 0.25) +
-    (mixScore * 0.50); // Rebalanceado sin energía
+    (bpmScore * W_BPM) +
+    (harmonicScore * W_HARMONIC) +
+    (mixScore * W_MIX);
 
   return { score: Math.round(total), transition: mixResult };
 }

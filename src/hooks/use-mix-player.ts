@@ -11,10 +11,11 @@ export interface MixTrack {
 }
 
 export interface MixTransition {
-    type: 'LONG_MIX' | 'QUICK_MIX' | 'DOUBLE_DROP' | 'CUT';
-    exitPointMs: number;
-    entryPointMs: number;
-    durationMs?: number; // Optional override
+    type: 'LONG_MIX' | 'QUICK_MIX' | 'DOUBLE_DROP' | 'CUT' | 'LOOP_MIX';
+    exitPointMs: number;      // Punto donde ESTA canción empieza a salir
+    entryPointMs: number;     // Punto donde LA SIGUIENTE canción entra
+    startPointMs?: number;    // Punto donde ESTA canción EMPIEZA a sonar (si no es 0)
+    durationMs?: number;      // Duración del crossfade
 }
 
 export interface MixSequenceItem {
@@ -81,11 +82,14 @@ export function useMixPlayer({ mixSequence, initialVolume = 1 }: UseMixPlayerPro
             deckA.current.src = firstItem.track.url;
             deckA.current.load();
 
-            // CRITICAL: Start from the entry point, not from 0
+            // CRITICAL: Start from startPointMs (where THIS track starts)
+            // NOT entryPointMs (which is where the NEXT track enters on THIS track)
             deckA.current.addEventListener('loadedmetadata', () => {
                 if (deckA.current) {
-                    const entryPointSec = (firstItem.transition?.entryPointMs || 0) / 1000;
-                    deckA.current.currentTime = entryPointSec;
+                    // startPointMs = donde empieza a sonar esta canción (default 0)
+                    const startPointSec = (firstItem.transition?.startPointMs || 0) / 1000;
+                    deckA.current.currentTime = startPointSec;
+                    deckA.current.volume = initialVolume; // Ensure full volume
 
                     // Auto-play
                     deckA.current.play().then(() => {
@@ -94,7 +98,7 @@ export function useMixPlayer({ mixSequence, initialVolume = 1 }: UseMixPlayerPro
                 }
             }, { once: true });
         }
-    }, [mixSequence]);
+    }, [mixSequence, initialVolume]);
 
     // Main Playback Loop
     const updateLoop = useCallback(() => {
@@ -135,6 +139,7 @@ export function useMixPlayer({ mixSequence, initialVolume = 1 }: UseMixPlayerPro
             // Default crossfade duration is 8s if not specified, or calculated based on type
             let crossfadeDuration = transition.durationMs || 8000;
             if (transition.type === 'QUICK_MIX') crossfadeDuration = 4000;
+            if (transition.type === 'LOOP_MIX') crossfadeDuration = 16000; // Loops need longer
             if (transition.type === 'CUT') crossfadeDuration = 100;
 
             // Start transition when we are at (ExitPoint - CrossfadeDuration)
@@ -153,7 +158,10 @@ export function useMixPlayer({ mixSequence, initialVolume = 1 }: UseMixPlayerPro
                         inactiveAudio.load();
                     }
 
-                    inactiveAudio.currentTime = transition.entryPointMs / 1000;
+                    // Start the next track from its startPointMs
+                    // (which was set from the entryPoint of this transition)
+                    const nextStartSec = (nextItem.transition?.startPointMs || 0) / 1000;
+                    inactiveAudio.currentTime = nextStartSec;
                     inactiveAudio.volume = 0;
                     inactiveAudio.play().catch(e => console.error("Error playing next deck", e));
                 }
@@ -164,6 +172,7 @@ export function useMixPlayer({ mixSequence, initialVolume = 1 }: UseMixPlayerPro
         if (transitionStatus === 'MIXING' && nextItem && transition) {
             let crossfadeDuration = transition.durationMs || 8000;
             if (transition.type === 'QUICK_MIX') crossfadeDuration = 4000;
+            if (transition.type === 'LOOP_MIX') crossfadeDuration = 16000;
             if (transition.type === 'CUT') crossfadeDuration = 100;
 
             const startMixTime = transition.exitPointMs - crossfadeDuration;
@@ -172,24 +181,28 @@ export function useMixPlayer({ mixSequence, initialVolume = 1 }: UseMixPlayerPro
             if (progress >= 1) {
                 // Transition Complete
                 console.log('Transition Complete. Swapping Decks.');
-                setTransitionStatus('IDLE');
-                setActiveDeck(prev => prev === 'A' ? 'B' : 'A');
-                setCurrentTrackIndex(prev => prev + 1);
-
-                // Reset Volume
-                if (activeAudio) {
-                    activeAudio.pause();
-                    activeAudio.volume = Math.min(1, Math.max(0, initialVolume));
-                    activeAudio.currentTime = 0;
-                }
+                
+                // IMPORTANT: First set volume to full on the NEW active deck
                 if (inactiveAudio) {
-                    // Ensure the new track is fully audible
                     inactiveAudio.volume = Math.min(1, Math.max(0, initialVolume));
-                    // Ensure it's playing if it wasn't already
+                    console.log(`🔊 New active deck volume set to: ${inactiveAudio.volume}`);
+                    // Ensure it's playing
                     if (inactiveAudio.paused) {
                         inactiveAudio.play().catch(e => console.warn("Swap play error:", e));
                     }
                 }
+                
+                // Then pause and reset the OLD deck
+                if (activeAudio) {
+                    activeAudio.pause();
+                    activeAudio.currentTime = 0;
+                    activeAudio.volume = Math.min(1, Math.max(0, initialVolume)); // Reset for next use
+                }
+                
+                // Update state AFTER audio operations
+                setTransitionStatus('IDLE');
+                setActiveDeck(prev => prev === 'A' ? 'B' : 'A');
+                setCurrentTrackIndex(prev => prev + 1);
             } else {
                 // Apply Crossfade (Equal Power or Linear)
                 // Linear for now for simplicity
@@ -211,9 +224,9 @@ export function useMixPlayer({ mixSequence, initialVolume = 1 }: UseMixPlayerPro
 
                 if (inactiveAudio) {
                     inactiveAudio.src = nextItem.track.url;
-                    // CRITICAL: Start from entry point, not 0
-                    const entryPointSec = (nextItem.transition?.entryPointMs || 0) / 1000;
-                    inactiveAudio.currentTime = entryPointSec;
+                    // CRITICAL: Start from startPointMs (where THIS new track starts)
+                    const startPointSec = (nextItem.transition?.startPointMs || 0) / 1000;
+                    inactiveAudio.currentTime = startPointSec;
                     inactiveAudio.volume = Math.min(1, Math.max(0, initialVolume));
                     inactiveAudio.play().catch(e => console.warn("Auto-play blocked:", e));
                 }
@@ -349,21 +362,28 @@ export function useMixPlayer({ mixSequence, initialVolume = 1 }: UseMixPlayerPro
         setTransitionStatus('IDLE');
     }, [mixSequence, currentTrackIndex, activeDeck, initialVolume, isPlaying, seek]);
 
-    // Calculate effective duration (exit point) for UI
+    // Calculate effective duration for UI
     const currentItem = mixSequence?.tracks[currentTrackIndex];
-    // If there is a transition, the "mix duration" is the exit point. 
-    // Otherwise it's the full track duration.
-    // Ensure we don't return 0 to avoid division by zero in UI
-    const mixDuration = (currentItem?.transition?.exitPointMs && currentItem.transition.exitPointMs > 0)
-        ? currentItem.transition.exitPointMs / 1000
-        : (currentItem?.track.duration || 1);
+    
+    // startPointMs: donde empieza esta canción (puede ser > 0 si saltamos intro)
+    // exitPointMs: donde termina esta canción (antes de la transición)
+    const startPointMs = currentItem?.transition?.startPointMs || 0;
+    const trackDurationMs = (currentItem?.track.duration || 0) * 1000;
+    const exitPointMs = currentItem?.transition?.exitPointMs || trackDurationMs || 0;
+    
+    // Duración efectiva = desde startPoint hasta exitPoint
+    const effectiveDurationMs = Math.max(1, exitPointMs - startPointMs);
 
     return {
         isPlaying,
         currentTrackIndex,
         currentTime,
-        duration: mixDuration, // Return the MIX duration for the UI progress bar
-        totalDuration: currentItem?.track.duration || 0, // Also return total if needed
+        // Datos para la barra de progreso
+        startPointMs,           // Donde empieza (para calcular 0%)
+        exitPointMs,            // Donde termina (para calcular 100%)
+        effectiveDurationMs,    // Duración de la ventana de reproducción
+        duration: exitPointMs / 1000, // Backwards compat
+        totalDuration: currentItem?.track.duration || 0,
         togglePlay,
         seek,
         skipNext,
